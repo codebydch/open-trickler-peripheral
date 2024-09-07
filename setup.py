@@ -12,7 +12,7 @@ LONG_DESCRIPTION = """
 DIY powder trickler control software.""".strip()
 
 DEPENDENCIES = [
-    'bluezero',
+    'bluezero<=0.8.0',
     'pybleno',
     'pyserial',
     'gpiozero',
@@ -23,8 +23,8 @@ DEPENDENCIES = [
 
 TEST_DEPENDENCIES = []
 
-VERSION = '2.0.0-dev'
-URL = 'https://github.com/ammolytics/projects/trickler'
+VERSION = '2.2.1'
+URL = 'https://github.com/ammolytics/open-trickler-peripheral/'
 
 setup(
     name='opentrickler',
@@ -44,6 +44,9 @@ setup(
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
     ],
 
     keywords='',
