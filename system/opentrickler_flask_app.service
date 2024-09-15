@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenTrickler Flask application
+After=network.target
+
+[Service]
+Type=idle
+User=pi
+Group=www-data
+Restart=on-failure
+WorkingDirectory=/code/open-trickler-peripheral/trickler
+Environment="PATH=/code/venv/bin"
+ExecStart=/code/venv/bin/python /code/open-trickler-peripheral/trickler/app.py ../opentrickler_config.ini
+
+[Install]
+WantedBy=multi-user.target

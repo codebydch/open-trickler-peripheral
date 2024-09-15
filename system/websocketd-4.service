@@ -1,0 +1,11 @@
+[Unit]
+Description=WebSocketD Service for OpenTrickler Screen Log
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/websocketd --port=8083 journalctl -n 1000 -u opentrickler_screen
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

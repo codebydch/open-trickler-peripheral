@@ -5,8 +5,10 @@ Released under the MIT license. See LICENSE file in the project root for details
 
 OpenTrickler
 https://github.com/ammolytics/projects/tree/develop/trickler
-"""
 
+OpenTrickler forked and updated here:
+https://github.com/codebydch/open-trickler-peripheral
+"""
 import datetime
 import decimal
 import enum
@@ -23,13 +25,13 @@ import scales
 # 0. Server (Pi)
 # 1. Scale (serial)
 # 2. Trickler (gpio/PWM)
-# 3. Dump (gpio/servo?)
+# 3. Dump (gpio/servo)
 # 4. API
 # 6. Bluetooth?
 # 7: Powder pan/cup?
 
 
-def trickler_loop(memcache, constants, pid, trickler_motor, scale, target_weight, target_unit, pidtune_logger): # pylint: disable=too-many-arguments;
+def trickler_loop(memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger): # pylint: disable=too-many-arguments;
     """Main trickler control loop run when all devices are ready, target weight is set, and auto-mode is on."""
     pidtune_logger.info('timestamp, input (motor %), output (weight %)')
     logging.info('Starting trickling process...')
@@ -60,7 +62,7 @@ def trickler_loop(memcache, constants, pid, trickler_motor, scale, target_weight
         pidtune_logger.info(
             '%s, %s, %s',
             datetime.datetime.now().timestamp(),
-            trickler_motor.speed,
+            trickler_motor1.speed,
             scale.weight / target_weight)
 
         # Trickling complete.
@@ -70,18 +72,39 @@ def trickler_loop(memcache, constants, pid, trickler_motor, scale, target_weight
 
         # PID controller requires float value instead of decimal.Decimal
         pid.update(float(scale.weight / target_weight) * 100)
-        trickler_motor.update(pid.output)
-        logging.debug('trickler_motor.speed: %r, pid.output: %r', trickler_motor.speed, pid.output)
+        trickler_motor1.update(pid.output)
+        trickler_motor2.update(pid.output)
+        logging.debug('trickler_motor1.speed: %r, trickler_motor2.speed: %r, pid.output: %r', trickler_motor1.speed, trickler_motor2.speed, pid.output)
         logging.info(
-            'remainder: %s %s scale: %s %s motor: %s',
+            'remainder: %s %s scale: %s %s motor1: %s motor2: %s',
             remainder_weight,
             target_unit,
             scale.weight,
             scale.unit,
-            trickler_motor.speed)
+            trickler_motor1.speed,
+            trickler_motor2.speed)
+
+        while remainder_weight <= 0.1:
+            trickler_motor2.off()
+            scale.update()
+            remainder_weight = target_weight - scale.weight
+            pid.update(float(scale.weight / target_weight) * 100)
+            trickler_motor1.update(pid.output)
+            logging.debug('trickler_motor1.speed: %r, trickler_motor2.speed: %r, pid.output: %r', trickler_motor1.speed, trickler_motor2.speed, pid.output)
+            logging.info(
+                'remainder: %s %s scale: %s %s motor1: %s motor2: %s',
+                remainder_weight,
+                target_unit,
+                scale.weight,
+                scale.unit,
+                trickler_motor1.speed,
+                trickler_motor2.speed)
+            if remainder_weight <= 0:
+                break
 
     # Clean up tasks.
-    trickler_motor.off()
+    trickler_motor1.off()
+    trickler_motor2.off()
     # Clear PID values.
     pid.clear()
     logging.info('Trickling process stopped.')
@@ -99,9 +122,12 @@ def main(config, memcache, args, pidtune_logger):
     logging.debug('pid: %r', pid)
 
     # Set up the trickler motor controller.
-    trickler_motor = motors.TricklerMotor(config, memcache=memcache)
-    logging.debug('trickler_motor: %r', trickler_motor)
-    #servo_motor = gpiozero.AngularServo(int(config['motors']['servo_pin']))
+    trickler_motor1 = motors.TricklerMotor(1, config, memcache=memcache)
+    logging.debug('trickler_motor1: %r', trickler_motor1)
+    trickler_motor2 = motors.TricklerMotor(2, config, memcache=memcache)
+    logging.debug('trickler_motor2: %r', trickler_motor2)
+    servo_motor = motors.ServoMotor(config, memcache=memcache)
+    logging.debug('servo_motor: %r', servo_motor)
 
     # Set up the scale controller.
     scale_cls = scales.SCALES[config['scale']['model']]
@@ -152,10 +178,19 @@ def main(config, memcache, args, pidtune_logger):
                 scale.unit == target_unit and
                 scale.is_stable and
                 auto_mode):
-            # Wait a second to start trickling.
-            time.sleep(1)
+            # Stops the servo from dumping powder twice if the scale weight dips below the target weight
+            if ((target_weight - scale.weight) / target_weight) >= 0.5:
+                # Wait a second to dump powder and start trickling.
+                time.sleep(1)
+                logging.info('Starting powder dump...')
+                servo_motor.run_servo()
+                time.sleep(1.5)
+                servo_motor.set_initial_angle()
+                # Required since the larger powder drop hitting the cup may overshoot the weight until settling
+                time.sleep(1)
+                logging.info('Completed powder dump.')
             # Run trickler loop.
-            trickler_loop(memcache, constants, pid, trickler_motor, scale, target_weight, target_unit, pidtune_logger)
+            trickler_loop(memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)
 
 
 if __name__ == '__main__':

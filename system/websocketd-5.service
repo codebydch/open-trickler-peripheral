@@ -1,0 +1,11 @@
+[Unit]
+Description=WebSocketD Service for OpenTrickler Control Panel Log
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/websocketd --port=8084 journalctl -n 1000 -u opentrickler_flask_app
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

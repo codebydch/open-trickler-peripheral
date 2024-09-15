@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>OpenTrickler Control Panel</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f8f9fa;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+      }
+      .container {
+        background-color: #ffffff;
+        border-radius: 8px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        padding: 20px;
+        text-align: center;
+        max-width: 400px;
+        width: 100%;
+      }
+      h1 {
+        margin-bottom: 20px;
+        font-size: 24px;
+      }
+      p {
+        font-size: 18px;
+        margin: 10px 0;
+      }
+      .status-box {
+        display: inline-block;
+        padding: 5px 10px;
+        border-radius: 4px;
+        color: #ffffff;
+      }
+      .status-on {
+        background-color: #28a745;
+      }
+      .status-off {
+        background-color: #dc3545;
+      }
+      form {
+        margin-top: 20px;
+      }
+      label {
+        font-size: 16px;
+      }
+      input[type="number"] {
+        margin: 10px 0;
+        padding: 10px;
+        font-size: 16px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        width: calc(100% - 22px);
+      }
+      button {
+        margin-top: 10px;
+        padding: 10px 20px;
+        font-size: 16px;
+        color: #ffffff;
+        background-color: #007bff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:hover {
+        background-color: #0056b3;
+      }
+      .toggle-button {
+        background-color: #6c757d;
+      }
+      .toggle-button:hover {
+        background-color: #5a6268;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>OpenTrickler Control Panel</h1>
+      <p>Target Weight: {{ target_weight }}</p>
+      <p>Trickler Status: 
+        <span class="status-box {{ 'status-on' if auto_mode else 'status-off' }}">
+          {{ 'ON' if auto_mode else 'OFF' }}
+        </span>
+      </p>
+      <form method="post" action="/app/update">
+        <div>
+          <label for="target_weight">Target Weight:</label>
+          <input type="number" id="target_weight" name="target_weight" value="{{ target_weight }}" step="0.01" min="0">
+          <button type="submit" name="set_weight">Set Weight</button>
+        </div>
+        <div>
+          <button type="submit" name="toggle" class="toggle-button">Toggle Trickler Status</button>
+        </div>
+      </form>
+    </div>
+  </body>
+</html>

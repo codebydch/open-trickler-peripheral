@@ -1,0 +1,82 @@
+# Raspberry Pi Zeros have a small default swap size which causes your device to crash when updating
+# Edit the file /etc/dphys-swapfile and change CONF_SWAPSIZE to 2048
+# Reboot and then before doing anything enter the command "swapon"
+# Continue installing updates
+sudo apt update && sudo apt upgrade
+
+# Create code folder at root
+cd /
+sudo mkdir code
+sudo chown pi:pi code
+cd code
+
+# Create Python virtual environemnt
+cd /code
+python3 -m venv venv --system-site-packages
+source venv/bin/activate
+
+# Open Trickler install
+cd /code
+git clone https://github.com/codebydch/open-trickler-peripheral.git
+sudo apt install memcached
+pip3 install pymemcache
+
+# Adafruit Blinka install
+cd /code
+pip3 install --upgrade adafruit-python-shell
+wget https://raw.githubusercontent.com/adafruit/Raspberry-Pi-Installer-Scripts/master/raspi-blinka.py
+sudo -E env PATH=$PATH python3 raspi-blinka.py
+# say no to reboot, close everything down, and get ready for a reboot
+rm raspi-blinka.py
+# reboot
+sudo reboot
+
+# Adafruit Display install
+cd /code
+source venv/bin/activate
+pip3 install adafruit-circuitpython-rgb-display
+sudo apt-get install fonts-dejavu
+sudo apt-get install python3-pil
+sudo apt-get install python3-numpy
+
+# NGINX Web Server Install and Setup
+sudo apt install nginx
+cd /code/open-trickler-peripheral/html
+sudo cp *.html /var/www/html/
+cd /code/open-trickler-peripheral/nginx/
+sudo cp default /etc/nginx/sites-available/
+
+# websocketd install
+cd /code
+wget https://github.com/joewalnes/websocketd/releases/download/v0.3.0/websocketd-0.3.0-linux_arm.zip
+unzip -d websocketd websocketd-0.3.0-linux_arm.zip
+cd websocketd
+sudo cp websocketd /usr/sbin
+
+# pigpio install
+cd /code
+sudo apt-get install pigpio
+sudo systemctl enable pigpiod
+sudo systemctl daemon-reload
+pip install pigpio
+
+# systemctl scripts install
+cd /code/open-trickler-peripheral/system/
+sudo cp *.service /etc/systemd/system/
+sudo systemctl enable opentrickler_flask_app.service
+sudo systemctl enable opentrickler_flask_servo_app.service
+sudo systemctl enable opentrickler_screen.service
+sudo systemctl enable opentrickler.service
+sudo systemctl enable websocketd-1.service
+sudo systemctl enable websocketd-2.service
+sudo systemctl enable websocketd-4.service
+sudo systemctl enable websocketd-5.service
+sudo systemctl daemon-reload
+
+# install Flask
+cd /code
+pip install Flask
+
+# reboot
+sudo reboot
+

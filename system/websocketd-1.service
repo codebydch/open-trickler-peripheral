@@ -1,0 +1,11 @@
+[Unit]
+Description=WebSocketD Service for System Logs
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/websocketd --port=8081 journalctl -b 0
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
