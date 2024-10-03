@@ -11,6 +11,7 @@ import board
 import logging
 import enum
 import helpers
+import os
 
 from PIL import Image, ImageDraw, ImageFont
 from gpiozero import Button
@@ -22,8 +23,8 @@ class MiniPiTFTApp:
     def __init__(self, disp, button1_pin, button2_pin, font_path, colors, config, memcache_client, target_weight, auto_mode):
         self.constants = enum.Enum('memcache_vars', config['memcache_vars'])
         self.disp = disp
-        self.button1 = Button(button1_pin)
-        self.button2 = Button(button2_pin)
+        self.button1 = Button(button1_pin, hold_time=3)
+        self.button2 = Button(button2_pin, hold_time=3)
         self.font_path = font_path
         self.colors = colors
         self.memcache_client = memcache_client
@@ -98,11 +99,17 @@ class MiniPiTFTApp:
         self.set_memcache_value(self.constants.AUTO_MODE.value, self.auto_mode)
         self.update_display()
 
+    def shutdown_pi(self):
+        os.system("/sbin/shutdown -h now")
+
     def run(self):
         self.update_display()
         # Loop to update display with button presses
         while True:
-            if self.button1.is_pressed and self.button2.is_pressed:
+            if self.button2.is_held:
+                self.shutdown_pi()
+                break
+            elif self.button1.is_pressed and self.button2.is_pressed:
                 self.toggle_auto_mode()
                 time.sleep(0.5)  # Debounce delay
             elif self.button1.is_pressed:
