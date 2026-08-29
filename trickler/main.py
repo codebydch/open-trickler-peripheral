@@ -36,27 +36,30 @@ import scales
 # config file when the scale is set to grams.
 GRAINS_PER_GRAM = decimal.Decimal('15.4323583529')
 
+# How strongly each measured pulse pulls the learned feed rate toward what was just
+# observed. Low enough to ride out one odd reading, high enough to adapt to a different
+# powder within a few pulses.
+PULSE_RATE_LEARN = 0.4
 
-# Fallbacks for the [trickler] section, so an existing config file written before
-# that section was added still runs instead of crashing on startup.
-DEFAULT_TRICKLER_SETTINGS = {
-    'fine_trickle_weight': '2.0',
-    'pulse_trickle_weight': '0.15',
-    'pulse_on_time': '0.03',
-    'pulse_off_time': '0.15',
-    'pulse_pwm': '32',
-    'cutoff_weight': '0.0',
-    'rate_window': '4',
-    'lookahead_time': '0.35',
-}
+# Floor for the learned feed rate, so a run of pulses that delivered nothing can't drive
+# it to zero and break the on-time calculation.
+MIN_PULSE_RATE = 0.02
 
+# Give up on a charge after this many pulses in a row deliver nothing measurable. That
+# means an empty hopper or a jammed tube, not something more trickling will fix.
+MAX_EMPTY_PULSES = 8
 
 TricklerSettings = collections.namedtuple('TricklerSettings', (
     'fine_trickle_weight',
     'pulse_trickle_weight',
     'pulse_on_time',
+    'pulse_min_on_time',
     'pulse_off_time',
     'pulse_pwm',
+    'stall_pwm',
+    'pulse_rate',
+    'pulse_aim',
+    'settle_timeout',
     'cutoff_weight',
     'rate_window',
     'lookahead_time',
@@ -92,15 +95,114 @@ class FeedRateEstimator:
         return max(decimal.Decimal('0'), (new_weight - old_weight) / elapsed)
 
 
-def trickler_settings(config, scale, target_unit):
-    """Reads the trickler thresholds from the config file, converted to the target unit.
+class PulseFeeder:
+    """Feeds powder in short pulses and learns how much each one delivers.
+
+    A vibratory motor can't be driven below its stall point, so the only way to control
+    how much powder lands is to control how long it runs. How much a given run time
+    delivers depends on the powder -- stick and ball meter very differently -- so it is
+    measured from the scale as the charge finishes rather than set in the config file.
+    Each pulse is aimed at part of what's left, weighed once the pan settles, and the
+    result corrects the estimate used to size the next one.
+    """
+
+    def __init__(self, motor, scale, settings, memcache=None, constants=None):
+        """Constructor. Seeds the feed rate from memcache if a previous charge learned one."""
+        self._motor = motor
+        self._scale = scale
+        self._settings = settings
+        self._memcache = memcache
+        self._constants = constants
+        # Grains (or grams) delivered per second of motor on-time.
+        self._rate = float(settings.pulse_rate)
+        if memcache is not None and constants is not None:
+            learned = memcache.get(constants.TRICKLER_PULSE_RATE.value)
+            if learned:
+                self._rate = max(float(learned), MIN_PULSE_RATE)
+        self.empty_pulses = 0
+
+    @property
+    def rate(self):
+        """Weight delivered per second of motor on-time, as currently learned."""
+        return self._rate
+
+    @property
+    def min_dose(self):
+        """Smallest amount of powder a single pulse can deliver."""
+        return decimal.Decimal(str(self._rate * self._settings.pulse_min_on_time))
+
+    def done(self, remainder):
+        """True once another pulse would miss the target by more than stopping short does."""
+        return remainder <= max(self.min_dose / 2, self._settings.cutoff_weight)
+
+    def settled_weight(self):
+        """Reads the scale until it reports a stable weight, or the settle time runs out."""
+        deadline = time.time() + self._settings.settle_timeout
+        while time.time() < deadline:
+            self._scale.update()
+            if self._scale.is_fresh and self._scale.is_stable:
+                break
+        return self._scale.weight
+
+    def feed(self, remainder):
+        """Fires one pulse aimed at part of `remainder`, returning what it actually delivered."""
+        # Aim short of what's left so a mis-estimate lands under the target rather than
+        # over it. The next pulse closes whatever remains.
+        wanted = float(remainder) * self._settings.pulse_aim
+        on_time = wanted / self._rate if self._rate > 0 else self._settings.pulse_on_time
+        on_time = min(max(on_time, self._settings.pulse_min_on_time), self._settings.pulse_on_time)
+
+        before = self._scale.weight
+        self._motor.set_speed(self._pulse_speed())
+        time.sleep(on_time)
+        self._motor.off()
+        # Let the powder land before asking the scale what happened.
+        time.sleep(self._settings.pulse_off_time)
+        dose = self.settled_weight() - before
+        self._learn(on_time, dose)
+        return on_time, dose
+
+    def _pulse_speed(self):
+        """Pulse speed as a 0-1 PWM value, never below the point where the motor stalls."""
+        pwm = min(max(self._settings.pulse_pwm, self._settings.stall_pwm), 100.0)
+        return pwm / 100
+
+    def _learn(self, on_time, dose):
+        """Folds one measured pulse into the running feed-rate estimate."""
+        if dose < 0:
+            # Pan knocked or scale drifted. Nothing worth learning from this one.
+            logging.debug('Ignoring negative pulse dose: %r', dose)
+            return
+        # A pulse that delivered nothing drags the rate down, which lengthens the next
+        # pulse. That's the correction we want, so zero doses are learned from too.
+        observed = float(dose) / on_time
+        self._rate = max(self._rate + (observed - self._rate) * PULSE_RATE_LEARN, MIN_PULSE_RATE)
+        self.empty_pulses = 0 if dose > 0 else self.empty_pulses + 1
+        logging.debug(
+            'pulse on_time: %r dose: %r -> rate: %r (min dose %r)',
+            on_time, dose, self._rate, self.min_dose)
+        if self._memcache is not None and self._constants is not None:
+            self._memcache.set(self._constants.TRICKLER_PULSE_RATE.value, self._rate)
+
+
+def trickler_settings(config, memcache, constants, scale, target_unit):
+    """Reads the trickler thresholds in force right now, converted to the target unit.
+
+    Values set from the control panel win, then the config file, then the built-in
+    defaults. The control panel writes to memcache, and this runs once per charge, so a
+    change made while tuning takes effect on the very next throw without restarting the
+    service.
 
     The weights in the config file are given in grains, since that's the unit they were
     tuned in, so they need converting when the scale is set to grams.
     """
-    # Fall back to the defaults above for anything the config file doesn't set.
+    overrides = {}
+    if memcache is not None and constants is not None:
+        overrides = memcache.get(constants.TRICKLER_SETTINGS.value)
+        if not isinstance(overrides, dict):
+            overrides = {}
     configured = config['trickler'] if config.has_section('trickler') else {}
-    section = collections.ChainMap(configured, DEFAULT_TRICKLER_SETTINGS)
+    section = collections.ChainMap(overrides, configured, helpers.DEFAULT_TRICKLER_SETTINGS)
     factor = decimal.Decimal('1')
     if target_unit == scale.Units.GRAMS:
         factor = decimal.Decimal('1') / GRAINS_PER_GRAM
@@ -108,32 +210,74 @@ def trickler_settings(config, scale, target_unit):
         fine_trickle_weight=decimal.Decimal(section['fine_trickle_weight']) * factor,
         pulse_trickle_weight=decimal.Decimal(section['pulse_trickle_weight']) * factor,
         pulse_on_time=float(section['pulse_on_time']),
+        pulse_min_on_time=float(section['pulse_min_on_time']),
         pulse_off_time=float(section['pulse_off_time']),
         pulse_pwm=float(section['pulse_pwm']),
+        stall_pwm=float(section['stall_pwm']),
+        # The seed rate is in grains per second; convert it the same way as the weights.
+        pulse_rate=decimal.Decimal(section['pulse_rate']) * factor,
+        pulse_aim=float(section['pulse_aim']),
+        settle_timeout=float(section['settle_timeout']),
         cutoff_weight=decimal.Decimal(section['cutoff_weight']) * factor,
         rate_window=int(section['rate_window']),
         lookahead_time=decimal.Decimal(section['lookahead_time']))
 
 
-def pulse_trickler(motor, settings):
-    """Runs a trickler motor for a single short pulse, then pauses.
+def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
+    """Finishes the charge one measured pulse at a time, off settled scale readings.
 
-    The motor can't be driven below its minimum PWM without stalling, so the only way
-    to feed less powder per scale reading is to run it for less time. The pause after
-    the pulse gives the powder time to land and the scale time to report it, so the
-    next reading reflects what was just dispensed rather than lagging behind it.
+    Continuous trickling can't be trusted this close to the target: a decision made now
+    doesn't reach the scale for a couple of tenths of a second, by which point the
+    charge has moved past where it was aimed. Pulsing removes the guesswork -- nothing
+    is fed until the last thing fed has been weighed.
     """
-    motor.set_speed(settings.pulse_pwm / 100)
-    time.sleep(settings.pulse_on_time)
-    motor.off()
-    time.sleep(settings.pulse_off_time)
+    logging.info('Starting final approach. Learned rate: %r', feeder.rate)
+    weight = feeder.settled_weight()
+
+    while 1:
+        # Stop running if auto mode is disabled.
+        if not memcache.get(constants.AUTO_MODE.value):
+            logging.debug('auto mode disabled.')
+            return
+
+        # Stop running if scale's unit no longer matches target unit.
+        if scale.unit != target_unit:
+            logging.debug('Target unit does not match scale unit.')
+            return
+
+        # Stop running if pan removed.
+        if weight < 0:
+            logging.debug('Pan removed.')
+            return
+
+        remainder = target_weight - weight
+        if feeder.done(remainder):
+            logging.info(
+                'Charge complete. scale: %s %s remainder: %s (smallest pulse %s)',
+                weight, scale.unit, remainder, feeder.min_dose)
+            return
+
+        if feeder.empty_pulses >= MAX_EMPTY_PULSES:
+            logging.warning(
+                '%s pulses in a row delivered nothing, stopping. Check the hopper and '
+                'tube. remainder: %s %s',
+                feeder.empty_pulses, remainder, target_unit)
+            return
+
+        on_time, dose = feeder.feed(remainder)
+        weight = scale.weight
+        logging.info(
+            'remainder: %s %s scale: %s %s pulsed %.3fs -> %s',
+            remainder, target_unit, weight, scale.unit, on_time, dose)
 
 
-def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger): # pylint: disable=too-many-arguments,too-many-branches;
+def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger): # pylint: disable=too-many-arguments,too-many-branches,too-many-statements;
     """Main trickler control loop run when all devices are ready, target weight is set, and auto-mode is on."""
-    settings = trickler_settings(config, scale, target_unit)
+    settings = trickler_settings(config, memcache, constants, scale, target_unit)
     logging.debug('trickler settings: %r', settings)
     feed_rate = FeedRateEstimator(settings.rate_window)
+    feeder = PulseFeeder(trickler_motor1, scale, settings, memcache, constants)
+    stale_reads = 0
     pidtune_logger.info('timestamp, input (motor %), output (weight %)')
     logging.info('Starting trickling process...')
 
@@ -148,6 +292,17 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
 
             # Read scale values (weight/unit/stable)
             scale.update()
+
+            # The read can come back as a partial line, which leaves the previous weight
+            # in place. Acting on it would mean deciding twice on one reading, so skip
+            # the pass -- but don't let the motors run blind for long if it keeps up.
+            if not scale.is_fresh:
+                stale_reads += 1
+                if stale_reads >= settings.rate_window:
+                    logging.warning('No usable scale readings, stopping. Check the serial link.')
+                    break
+                continue
+            stale_reads = 0
 
             # Stop running if scale's unit no longer matches target unit.
             if scale.unit != target_unit:
@@ -187,6 +342,14 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
                 logging.debug('Trickling complete, motors turned off and PID reset.')
                 break
 
+            # Close enough to hand over to the pulse feeder, which finishes the charge
+            # against settled readings and then ends it.
+            if projected_remainder <= settings.pulse_trickle_weight:
+                trickler_motor1.off()
+                trickler_motor2.off()
+                pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit)
+                break
+
             # Enough powder is already on its way to finish the charge, even though the
             # scale hasn't reported it yet. Stop feeding and let the reading catch up
             # instead of piling more on top of it. If the charge lands short, the next
@@ -196,21 +359,6 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
                 trickler_motor2.off()
                 logging.debug('Projected weight has reached target, waiting for the scale.')
                 time.sleep(settings.pulse_off_time)
-                continue
-
-            # Final approach. Running a motor continuously this close to the target
-            # overshoots it, so feed in short pulses and re-read the scale after each
-            # one.
-            if projected_remainder <= settings.pulse_trickle_weight:
-                trickler_motor2.off()
-                pulse_trickler(trickler_motor1, settings)
-                logging.info(
-                    'remainder: %s %s scale: %s %s pulsing motor1 for %ss',
-                    remainder_weight,
-                    target_unit,
-                    scale.weight,
-                    scale.unit,
-                    settings.pulse_on_time)
                 continue
 
             # PID controller requires float value instead of decimal.Decimal
