@@ -49,25 +49,6 @@ MIN_PULSE_RATE = 0.02
 # means an empty hopper or a jammed tube, not something more trickling will fix.
 MAX_EMPTY_PULSES = 8
 
-# Fallbacks for the [trickler] section, so an existing config file written before
-# that section was added still runs instead of crashing on startup.
-DEFAULT_TRICKLER_SETTINGS = {
-    'fine_trickle_weight': '1.5',
-    'pulse_trickle_weight': '0.5',
-    'pulse_on_time': '0.2',
-    'pulse_min_on_time': '0.03',
-    'pulse_off_time': '0.1',
-    'pulse_pwm': '25',
-    'stall_pwm': '20',
-    'pulse_rate': '0.3',
-    'pulse_aim': '0.7',
-    'settle_timeout': '1.0',
-    'cutoff_weight': '0.01',
-    'rate_window': '4',
-    'lookahead_time': '0.35',
-}
-
-
 TricklerSettings = collections.namedtuple('TricklerSettings', (
     'fine_trickle_weight',
     'pulse_trickle_weight',
@@ -204,15 +185,24 @@ class PulseFeeder:
             self._memcache.set(self._constants.TRICKLER_PULSE_RATE.value, self._rate)
 
 
-def trickler_settings(config, scale, target_unit):
-    """Reads the trickler thresholds from the config file, converted to the target unit.
+def trickler_settings(config, memcache, constants, scale, target_unit):
+    """Reads the trickler thresholds in force right now, converted to the target unit.
+
+    Values set from the control panel win, then the config file, then the built-in
+    defaults. The control panel writes to memcache, and this runs once per charge, so a
+    change made while tuning takes effect on the very next throw without restarting the
+    service.
 
     The weights in the config file are given in grains, since that's the unit they were
     tuned in, so they need converting when the scale is set to grams.
     """
-    # Fall back to the defaults above for anything the config file doesn't set.
+    overrides = {}
+    if memcache is not None and constants is not None:
+        overrides = memcache.get(constants.TRICKLER_SETTINGS.value)
+        if not isinstance(overrides, dict):
+            overrides = {}
     configured = config['trickler'] if config.has_section('trickler') else {}
-    section = collections.ChainMap(configured, DEFAULT_TRICKLER_SETTINGS)
+    section = collections.ChainMap(overrides, configured, helpers.DEFAULT_TRICKLER_SETTINGS)
     factor = decimal.Decimal('1')
     if target_unit == scale.Units.GRAMS:
         factor = decimal.Decimal('1') / GRAINS_PER_GRAM
@@ -283,7 +273,7 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
 
 def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger): # pylint: disable=too-many-arguments,too-many-branches,too-many-statements;
     """Main trickler control loop run when all devices are ready, target weight is set, and auto-mode is on."""
-    settings = trickler_settings(config, scale, target_unit)
+    settings = trickler_settings(config, memcache, constants, scale, target_unit)
     logging.debug('trickler settings: %r', settings)
     feed_rate = FeedRateEstimator(settings.rate_window)
     feeder = PulseFeeder(trickler_motor1, scale, settings, memcache, constants)

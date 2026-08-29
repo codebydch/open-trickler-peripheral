@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>OpenTrickler Tuning</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f8f9fa;
+        margin: 0;
+        padding: 20px 10px;
+      }
+      .container {
+        background-color: #ffffff;
+        border-radius: 8px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        padding: 20px;
+        max-width: 640px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin-top: 0;
+        font-size: 24px;
+        text-align: center;
+      }
+      .intro {
+        font-size: 14px;
+        color: #495057;
+        line-height: 1.5;
+      }
+      .status {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        background-color: #f1f3f5;
+        border-radius: 6px;
+        padding: 12px;
+        margin: 16px 0;
+      }
+      .status div {
+        flex: 1 1 30%;
+        font-size: 14px;
+      }
+      .status span {
+        display: block;
+        font-size: 19px;
+        font-weight: bold;
+        margin-top: 3px;
+      }
+      .notice, .warn {
+        border-radius: 4px;
+        padding: 10px;
+        margin-bottom: 16px;
+        font-size: 15px;
+      }
+      .notice { background-color: #d4edda; color: #155724; }
+      .warn { background-color: #fff3cd; color: #856404; }
+      .field {
+        border-top: 1px solid #e9ecef;
+        padding: 12px 0;
+      }
+      .field label {
+        font-size: 16px;
+        font-weight: bold;
+        display: block;
+      }
+      .field p {
+        font-size: 13px;
+        color: #6c757d;
+        margin: 4px 0 8px;
+        line-height: 1.4;
+      }
+      .field .error {
+        color: #b02a37;
+        font-size: 13px;
+        margin: 4px 0 0;
+      }
+      input[type="number"] {
+        padding: 10px;
+        font-size: 16px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        width: 160px;
+      }
+      button {
+        margin-top: 10px;
+        padding: 10px 20px;
+        font-size: 16px;
+        color: #ffffff;
+        background-color: #007bff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:hover { background-color: #0056b3; }
+      .secondary { background-color: #6c757d; }
+      .secondary:hover { background-color: #5a6268; }
+      .actions {
+        border-top: 1px solid #e9ecef;
+        padding-top: 16px;
+        margin-top: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .links {
+        text-align: center;
+        margin-top: 16px;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>OpenTrickler Tuning</h1>
+
+      <p class="intro">
+        These control how the trickler finishes a charge. Changes apply to the next
+        charge straight away &mdash; no restart &mdash; and are written back to the
+        config file so they survive a reboot.
+      </p>
+
+      <div class="status">
+        <div>Scale<span id="scale">&mdash;</span></div>
+        <div>Target<span id="target">&mdash;</span></div>
+        <div>Motor<span id="motor">&mdash;</span></div>
+        <div>Learned feed rate<span id="rate">&mdash;</span></div>
+        <div>Auto mode<span id="auto">&mdash;</span></div>
+        <div>Scale reading<span id="stable">&mdash;</span></div>
+      </div>
+
+      {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+      {% if live %}
+        <div class="warn">
+          Some values are currently overridden from this page. "Revert to config file"
+          below drops them.
+        </div>
+      {% endif %}
+
+      <form method="post" action="/app/config/update">
+        {% for setting in settings %}
+          <div class="field">
+            <label for="{{ setting.name }}">{{ setting.label }}</label>
+            <p>{{ setting.description }}</p>
+            <input type="number" id="{{ setting.name }}" name="{{ setting.name }}"
+                   value="{{ values[setting.name] }}" step="{{ setting.step }}"
+                   min="{{ setting.minimum }}" max="{{ setting.maximum }}">
+            {% if errors.get(setting.name) %}
+              <p class="error">{{ errors[setting.name] }}</p>
+            {% endif %}
+          </div>
+        {% endfor %}
+
+        <div class="actions">
+          <button type="submit" name="save">Apply</button>
+          <button type="submit" name="reset_overrides" class="secondary"
+                  formnovalidate>Revert to config file</button>
+          <button type="submit" name="reset_learned" class="secondary"
+                  formnovalidate>Clear learned feed rate</button>
+        </div>
+      </form>
+
+      <p class="links">
+        <a href="/app/">Control Panel</a> &middot;
+        <a href="/">All pages</a>
+      </p>
+    </div>
+
+    <script>
+      // Poll the live values so the readings above track what the trickler is doing
+      // while you tune. Failures are ignored; the page is still usable without them.
+      function refresh() {
+        fetch('/app/status')
+          .then(function (response) { return response.json(); })
+          .then(function (data) {
+            document.getElementById('scale').textContent =
+              data.scale_weight === null ? '—' : data.scale_weight;
+            document.getElementById('target').textContent =
+              data.target_weight === null ? '—' : data.target_weight;
+            document.getElementById('motor').textContent =
+              data.motor_speed === null ? '—' : Math.round(data.motor_speed * 100) + '%';
+            document.getElementById('rate').textContent =
+              data.pulse_rate === null ? 'not learned yet' : data.pulse_rate + ' /s';
+            document.getElementById('auto').textContent = data.auto_mode ? 'ON' : 'OFF';
+            document.getElementById('stable').textContent =
+              data.scale_is_stable ? 'stable' : 'moving';
+          })
+          .catch(function () {});
+      }
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
+  </body>
+</html>
