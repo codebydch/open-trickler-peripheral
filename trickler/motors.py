@@ -49,6 +49,13 @@ class TricklerMotor:
     def update(self, target_pwm):
         """Change PWM speed of motor (int), enforcing clamps."""
         logging.debug('Updating target_pwm to %r', target_pwm)
+        # A zero or negative target means the controller wants no more powder. Turn the
+        # motor off rather than clamping back up to the minimum speed and continuing to
+        # feed.
+        if target_pwm <= 0:
+            logging.debug('target_pwm %r is not positive, turning motor off.', target_pwm)
+            self.off()
+            return
         target_pwm = max(min(int(target_pwm), self.max_pwm), self.min_pwm)
         logging.debug('Adjusted clamped target_pwm to %r', target_pwm)
         self.set_speed(target_pwm / 100)
