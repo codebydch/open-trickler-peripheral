@@ -9,6 +9,7 @@ https://github.com/ammolytics/projects/tree/develop/trickler
 OpenTrickler forked and updated here:
 https://github.com/codebydch/open-trickler-peripheral
 """
+import collections
 import datetime
 import decimal
 import enum
@@ -31,65 +32,196 @@ import scales
 # 7: Powder pan/cup?
 
 
-def trickler_loop(memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger): # pylint: disable=too-many-arguments;
+# Grains per gram, used to convert the grain-based trickler thresholds in the
+# config file when the scale is set to grams.
+GRAINS_PER_GRAM = decimal.Decimal('15.4323583529')
+
+
+# Fallbacks for the [trickler] section, so an existing config file written before
+# that section was added still runs instead of crashing on startup.
+DEFAULT_TRICKLER_SETTINGS = {
+    'fine_trickle_weight': '2.0',
+    'pulse_trickle_weight': '0.15',
+    'pulse_on_time': '0.03',
+    'pulse_off_time': '0.15',
+    'pulse_pwm': '32',
+    'cutoff_weight': '0.0',
+    'rate_window': '4',
+    'lookahead_time': '0.35',
+}
+
+
+TricklerSettings = collections.namedtuple('TricklerSettings', (
+    'fine_trickle_weight',
+    'pulse_trickle_weight',
+    'pulse_on_time',
+    'pulse_off_time',
+    'pulse_pwm',
+    'cutoff_weight',
+    'rate_window',
+    'lookahead_time',
+))
+
+
+class FeedRateEstimator:
+    """Estimates how fast powder is landing in the pan, in target units per second.
+
+    Scale readings lag behind reality: powder is still in the air, and the scale needs
+    time to settle before it reports what has landed. Knowing the current feed rate
+    lets the loop work out how much powder is already on its way and stop the motors
+    before the reading reaches the target, instead of after.
+    """
+
+    def __init__(self, window):
+        """Constructor. Keeps the last `window` readings to average the rate over."""
+        self._samples = collections.deque(maxlen=max(2, window))
+
+    def add(self, weight, timestamp=None):
+        """Records a scale reading."""
+        self._samples.append((timestamp if timestamp is not None else time.time(), weight))
+
+    def rate(self):
+        """Returns the weight gained per second over the sample window, never negative."""
+        if len(self._samples) < 2:
+            return decimal.Decimal('0')
+        old_time, old_weight = self._samples[0]
+        new_time, new_weight = self._samples[-1]
+        elapsed = decimal.Decimal(str(new_time - old_time))
+        if elapsed <= 0:
+            return decimal.Decimal('0')
+        return max(decimal.Decimal('0'), (new_weight - old_weight) / elapsed)
+
+
+def trickler_settings(config, scale, target_unit):
+    """Reads the trickler thresholds from the config file, converted to the target unit.
+
+    The weights in the config file are given in grains, since that's the unit they were
+    tuned in, so they need converting when the scale is set to grams.
+    """
+    # Fall back to the defaults above for anything the config file doesn't set.
+    configured = config['trickler'] if config.has_section('trickler') else {}
+    section = collections.ChainMap(configured, DEFAULT_TRICKLER_SETTINGS)
+    factor = decimal.Decimal('1')
+    if target_unit == scale.Units.GRAMS:
+        factor = decimal.Decimal('1') / GRAINS_PER_GRAM
+    return TricklerSettings(
+        fine_trickle_weight=decimal.Decimal(section['fine_trickle_weight']) * factor,
+        pulse_trickle_weight=decimal.Decimal(section['pulse_trickle_weight']) * factor,
+        pulse_on_time=float(section['pulse_on_time']),
+        pulse_off_time=float(section['pulse_off_time']),
+        pulse_pwm=float(section['pulse_pwm']),
+        cutoff_weight=decimal.Decimal(section['cutoff_weight']) * factor,
+        rate_window=int(section['rate_window']),
+        lookahead_time=decimal.Decimal(section['lookahead_time']))
+
+
+def pulse_trickler(motor, settings):
+    """Runs a trickler motor for a single short pulse, then pauses.
+
+    The motor can't be driven below its minimum PWM without stalling, so the only way
+    to feed less powder per scale reading is to run it for less time. The pause after
+    the pulse gives the powder time to land and the scale time to report it, so the
+    next reading reflects what was just dispensed rather than lagging behind it.
+    """
+    motor.set_speed(settings.pulse_pwm / 100)
+    time.sleep(settings.pulse_on_time)
+    motor.off()
+    time.sleep(settings.pulse_off_time)
+
+
+def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger): # pylint: disable=too-many-arguments,too-many-branches;
     """Main trickler control loop run when all devices are ready, target weight is set, and auto-mode is on."""
+    settings = trickler_settings(config, scale, target_unit)
+    logging.debug('trickler settings: %r', settings)
+    feed_rate = FeedRateEstimator(settings.rate_window)
     pidtune_logger.info('timestamp, input (motor %), output (weight %)')
     logging.info('Starting trickling process...')
 
     # Note(eric): All `break` calls will exit the loop and this function.
-    while 1:
-        # Stop running if auto mode is disabled.
-        if not memcache.get(constants.AUTO_MODE.value):
-            logging.debug('auto mode disabled.')
-            break
+    # The `finally` block below stops both motors on every exit path.
+    try:
+        while 1:
+            # Stop running if auto mode is disabled.
+            if not memcache.get(constants.AUTO_MODE.value):
+                logging.debug('auto mode disabled.')
+                break
 
-        # Read scale values (weight/unit/stable)
-        scale.update()
-
-        # Stop running if scale's unit no longer matches target unit.
-        if scale.unit != target_unit:
-            logging.debug('Target unit does not match scale unit.')
-            break
-
-        # Stop running if pan removed.
-        if scale.weight < 0:
-            logging.debug('Pan removed.')
-            break
-
-        remainder_weight = target_weight - scale.weight
-        logging.debug('remainder_weight: %r', remainder_weight)
-
-        pidtune_logger.info(
-            '%s, %s, %s',
-            datetime.datetime.now().timestamp(),
-            trickler_motor1.speed,
-            scale.weight / target_weight)
-
-        # Trickling complete.
-        if remainder_weight <= 0:
-            logging.debug('Trickling complete, motor turned off and PID reset.')
-            break
-
-        # PID controller requires float value instead of decimal.Decimal
-        pid.update(float(scale.weight / target_weight) * 100)
-        trickler_motor1.update(pid.output)
-        trickler_motor2.update(pid.output)
-        logging.debug('trickler_motor1.speed: %r, trickler_motor2.speed: %r, pid.output: %r', trickler_motor1.speed, trickler_motor2.speed, pid.output)
-        logging.info(
-            'remainder: %s %s scale: %s %s motor1: %s motor2: %s',
-            remainder_weight,
-            target_unit,
-            scale.weight,
-            scale.unit,
-            trickler_motor1.speed,
-            trickler_motor2.speed)
-
-        while remainder_weight <= 0.1:
-            trickler_motor2.off()
+            # Read scale values (weight/unit/stable)
             scale.update()
+
+            # Stop running if scale's unit no longer matches target unit.
+            if scale.unit != target_unit:
+                logging.debug('Target unit does not match scale unit.')
+                break
+
+            # Stop running if pan removed.
+            if scale.weight < 0:
+                logging.debug('Pan removed.')
+                break
+
+            feed_rate.add(scale.weight)
             remainder_weight = target_weight - scale.weight
+            # Powder that is already in the air or that the scale hasn't caught up with
+            # yet. Every decision below is made against what the charge is about to
+            # weigh, not what the scale is reporting right now.
+            in_flight_weight = feed_rate.rate() * settings.lookahead_time
+            projected_remainder = remainder_weight - in_flight_weight
+            logging.debug(
+                'remainder_weight: %r, in_flight_weight: %r, projected_remainder: %r',
+                remainder_weight,
+                in_flight_weight,
+                projected_remainder)
+
+            pidtune_logger.info(
+                '%s, %s, %s',
+                datetime.datetime.now().timestamp(),
+                trickler_motor1.speed,
+                scale.weight / target_weight)
+
+            # Trickling complete. Stop both motors here, before anything else in this
+            # iteration can command them again, so no more powder goes into a pan that
+            # has already reached the target weight.
+            if remainder_weight <= settings.cutoff_weight:
+                trickler_motor1.off()
+                trickler_motor2.off()
+                logging.debug('Trickling complete, motors turned off and PID reset.')
+                break
+
+            # Enough powder is already on its way to finish the charge, even though the
+            # scale hasn't reported it yet. Stop feeding and let the reading catch up
+            # instead of piling more on top of it. If the charge lands short, the next
+            # pass picks the trickling back up.
+            if projected_remainder <= settings.cutoff_weight:
+                trickler_motor1.off()
+                trickler_motor2.off()
+                logging.debug('Projected weight has reached target, waiting for the scale.')
+                time.sleep(settings.pulse_off_time)
+                continue
+
+            # Final approach. Running a motor continuously this close to the target
+            # overshoots it, so feed in short pulses and re-read the scale after each
+            # one.
+            if projected_remainder <= settings.pulse_trickle_weight:
+                trickler_motor2.off()
+                pulse_trickler(trickler_motor1, settings)
+                logging.info(
+                    'remainder: %s %s scale: %s %s pulsing motor1 for %ss',
+                    remainder_weight,
+                    target_unit,
+                    scale.weight,
+                    scale.unit,
+                    settings.pulse_on_time)
+                continue
+
+            # PID controller requires float value instead of decimal.Decimal
             pid.update(float(scale.weight / target_weight) * 100)
             trickler_motor1.update(pid.output)
+            # The second trickler only runs while there's still a meaningful amount of
+            # powder left to throw. It feeds too fast to be used near the target.
+            if projected_remainder <= settings.fine_trickle_weight:
+                trickler_motor2.off()
+            else:
+                trickler_motor2.update(pid.output)
             logging.debug('trickler_motor1.speed: %r, trickler_motor2.speed: %r, pid.output: %r', trickler_motor1.speed, trickler_motor2.speed, pid.output)
             logging.info(
                 'remainder: %s %s scale: %s %s motor1: %s motor2: %s',
@@ -99,14 +231,12 @@ def trickler_loop(memcache, constants, pid, trickler_motor1, trickler_motor2, sc
                 scale.unit,
                 trickler_motor1.speed,
                 trickler_motor2.speed)
-            if remainder_weight <= 0:
-                break
-
-    # Clean up tasks.
-    trickler_motor1.off()
-    trickler_motor2.off()
-    # Clear PID values.
-    pid.clear()
+    finally:
+        # Clean up tasks.
+        trickler_motor1.off()
+        trickler_motor2.off()
+        # Clear PID values.
+        pid.clear()
     logging.info('Trickling process stopped.')
 
 
@@ -190,7 +320,7 @@ def main(config, memcache, args, pidtune_logger):
                 time.sleep(1)
                 logging.info('Completed powder dump.')
             # Run trickler loop.
-            trickler_loop(memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)
+            trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)
 
 
 if __name__ == '__main__':
