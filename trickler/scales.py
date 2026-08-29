@@ -75,6 +75,10 @@ class SerialScale: # pylint: disable=too-many-instance-attributes;
         self.resolution = self.resolution_map[self.unit]
         self.weight = decimal.Decimal('0.00')
         self.status = self.StatusMap.STABLE
+        # Whether the last update() actually parsed a weight. Clearing the input buffer
+        # mid-line leaves a partial read that can't be decoded, in which case self.weight
+        # still holds the previous reading and callers need to know not to act on it.
+        self.is_fresh = False
         self._store_scale_config()
         # Internal storage for scale readings to infer stability, used for scales that don't provide it.
         self._readings = collections.deque(maxlen=int(config['scale']['stable_reading_length']))
@@ -208,6 +212,7 @@ class ANDScale(SerialScale):
             None: noop,
         }
 
+        self.is_fresh = False
         # Note: The input buffer can fill up, causing latency. Clear it before reading.
         self._serial.reset_input_buffer()
         raw = self._serial.readline()
@@ -235,6 +240,7 @@ class ANDScale(SerialScale):
         self.unit = self.unit_map[unit]
         # Update the resolution according to the current unit of measure and supported resolutions.
         self.resolution = self.resolution_map[self.unit]
+        self.is_fresh = True
         # Update memcache values.
         self._update_memcache()
 
@@ -323,6 +329,7 @@ class CreedmoorScale(SerialScale):
             None: noop,
         }
 
+        self.is_fresh = False
         # Note: The input buffer can fill up, causing latency. Clear it before reading.
         self._serial.reset_input_buffer()
         raw = self._serial.readline()
@@ -354,6 +361,7 @@ class CreedmoorScale(SerialScale):
         self.unit = self.unit_map[unit]
         # Update the resolution according to the current unit of measure and supported resolutions.
         self.resolution = self.resolution_map[self.unit]
+        self.is_fresh = True
         # Update memcache values.
         self._update_memcache()
 
@@ -400,6 +408,7 @@ class USSolidScale(SerialScale):
             None: noop,
         }
 
+        self.is_fresh = False
         # Note: The input buffer can fill up, causing latency. Clear it before reading.
         self._serial.reset_input_buffer()
         raw = self._serial.readline()
@@ -432,6 +441,7 @@ class USSolidScale(SerialScale):
         self.unit = self.unit_map[unit]
         # Update the resolution according to the current unit of measure and supported resolutions.
         self.resolution = self.resolution_map[self.unit]
+        self.is_fresh = True
         # Update memcache values.
         self._update_memcache()
 
