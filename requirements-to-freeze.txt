@@ -1,7 +1,11 @@
-bluezero==0.8.0
-pybleno
+# Trickler daemon and web apps.
 pyserial
 gpiozero
+pigpio
 pymemcache
-RPi.GPIO; platform_machine == 'armv6l'
-grpcio
+flask
+
+# Mini PiTFT screen (trickler/screen.py).
+Pillow
+adafruit-blinka
+adafruit-circuitpython-rgb-display

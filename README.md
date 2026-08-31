@@ -1,89 +1,128 @@
-# Ammolytics: Open Trickler Controller
+# Open Trickler — two-trickler build
 
-**Now in Python!**
-The system was rewritten from scratch. It now supports PID controls, PWM motor control, among other things. [See PR 51 for more info!](https://github.com/ammolytics/projects/pull/51)
-  
-This portion of the Open Trickler is used to control the scale and trickler motor. It's designed to be run on a Raspberry Pi Zero W, but any similar system which supports Bluetooth may work, but I have not tested them.
+A fork of [Ammolytics' Open Trickler](https://github.com/ammolytics/open-trickler-peripheral),
+rebuilt around a different machine: a servo-driven powder measure, **two** vibratory
+tricklers, a Mini PiTFT screen with buttons, and browser control instead of Bluetooth.
 
+Runs on a Raspberry Pi under Raspberry Pi OS as a set of systemd services. Everything is
+reachable at [http://opentrickler.local](http://opentrickler.local).
 
-## Support
+## How a charge is thrown
 
-Need help? [Check the FAQ](https://github.com/ammolytics/open-trickler-peripheral/wiki/Frequently-Asked-Questions) or [join our Discord Server](https://discord.gg/WqTbyK2) to chat with other folks who are building the Open Trickler and helping each other out.
+1. You set a target weight — on the screen, or from the control panel in a browser — and
+   turn auto mode on.
+2. When the pan is on the scale, settled, and under target, the servo trips the powder
+   measure for a coarse drop.
+3. Both tricklers run under PID control until the charge is within `fine_trickle_weight`
+   of target, then trickler 2 shuts off and trickler 1 continues alone.
+4. Inside `pulse_trickle_weight`, continuous feeding stops for good and the **pulse
+   feeder** finishes the charge.
 
-This is a free, open-source project which does not come with any official support or warranty.
+The pulse feeder is the part that decides accuracy. A vibratory motor can't be driven
+slower than its stall point, so the only way to control how much powder lands is to
+control how long it runs. Each pulse is aimed at a fraction of what's left, fired, and
+then weighed once the scale reports stable — nothing is fed until the last thing fed has
+been measured. The measured dose corrects a running estimate of grains per second of
+motor on-time, so pulse length adapts to the powder instead of being configured. It stops
+when another pulse would miss the target by more than stopping short does.
 
+That learned rate is kept in memcache between charges and shown on the tuning page. If
+you change powder, clear it there and it re-learns within a few charges.
 
-## Installing Latest Firmware
+## Pages
 
-1. Download the latest firmware image from the most recent [automated build](https://github.com/ammolytics/opentrickler-buildroot/actions/workflows/build-ot-firmware.yml)
-  Builds run every Monday morning. Firmware images can be downloaded from the Artifacts section of a given build. They expire after 90 days.
-1. Flash your microSD card using [balenaEtcher](https://www.balena.io/etcher/)
-  I **highly** recommend the free [balenaEtcher program](https://www.balena.io/etcher/) for this step as it's much smarter and less error/mistake prone.
-1. Open the `BOOT` partition (shows up like a USB-drive when plugged into your computer) on the microSD card. Edit the `wpa_supplicant.conf` file with your WiFi settings.
-  Optional, but recommended since it provides more debugging capabilities through your browser at [http://opentrickler.local](http://opentrickler.local).
-  See here for more help: https://www.raspberrypi.org/documentation/configuration/wireless/headless.md
-1. Open the `CODE` parition on the microSD card. Edit the `opentrickler_config.ini` file to modify the Open Trickler settings. Defaults should work for most people.
-  Note: Windows users may need to assign a driver letter [in order to see the CODE partition](https://github.com/ammolytics/projects/issues/42#issuecomment-673627027).
-1. Plug the microSD card into your Pi.
-1. Turn on your scale.
-1. Turn on your Pi to boot the Open Trickler system.
-1. The onboard LED should "pulse" once it's booted up and ready!
-1. Connect with your mobile app.
+| URL | What it is |
+| --- | --- |
+| `/` | Index and links to the log viewers |
+| `/app/` | Control panel: set target weight, toggle auto mode |
+| `/app/config/` | Tuning page: trickler settings, live scale readout, learned feed rate |
+| `/servo/` | Servo control panel, for setting up the powder measure |
+| `/opentrickler.html` | Trickler log |
+| `/screen.html` | Screen log |
+| `/flask.html` | Control panel log |
+| `/system.html` | Full system log |
 
-Please share any feedback/results on [Discord](https://discord.gg/WqTbyK2) or in a [GitHub issue](https://github.com/ammolytics/open-trickler-peripheral/issues).
+Changes made on the tuning page apply to the **next charge** without restarting anything,
+and are written back to `opentrickler_config.ini` so they survive a reboot.
 
+## Install
+
+See [`setup.txt`](setup.txt) for the full walkthrough — swap size, the `/code` directory,
+the virtualenv, Adafruit Blinka for the screen, memcached, nginx, websocketd, and
+enabling the services in [`system/`](system).
+
+## Configuration
+
+`opentrickler_config.ini` is the single source of truth, and every value is commented in
+place. The sections worth knowing:
+
+- `[scale]` — model, serial port, baud rate. Supports A&D, Creedmoor and U.S. Solid.
+- `[motor1]` / `[motor2]` — GPIO pin and PWM limits per trickler. `trickler_min_pwm` is
+  the floor the motor is driven at; set it just above the speed where powder stops
+  moving.
+- `[trickler]` — the final approach. `fine_trickle_weight`, `pulse_trickle_weight`,
+  pulse timing, and the learned-rate seed. All weights are in **grains** and converted
+  automatically if the scale is set to grams.
+- `[servo]` — powder measure travel and pulse widths.
+- `[PID]` — gains for the continuous phases only. The pulse feeder does not use the PID.
+
+**Tuning for accuracy:** `pulse_trickle_weight` must be comfortably larger than what a
+trickler can throw during the time the scale takes to report a change — feed rate ×
+scale lag. If charges run heavy, raise that first. `pulse_min_on_time` sets the finest
+dose the machine can place, and so the best accuracy it can reach.
+
+## Services
+
+| Unit | Runs |
+| --- | --- |
+| `opentrickler` | `trickler/main.py` — the control loop |
+| `opentrickler_screen` | `trickler/screen.py` — Mini PiTFT and buttons |
+| `opentrickler_flask_app` | `trickler/app.py` — control panel and tuning page (:5000) |
+| `opentrickler_flask_servo_app` | `trickler/servo_app.py` — servo panel (:5001) |
+| `websocketd-1,2,4,5` | Log streams for the browser viewers |
 
 ## Debugging
 
-Once your Open Trickler has booted up, you can visit [http://opentrickler.local](http://opentrickler.local) in your browser to access its log files. This is helpful for debugging issues with the stock Open Trickler software, hardware problems, and any issues with your own custom software code changes.
+```bash
+journalctl -u opentrickler -f
+systemctl status opentrickler --no-pager
+```
 
-**Note:** Accessing the opentrickler.local website requires putting your Open Trickler onto your wireless network, as described in Step 3 of the Instructions.
+The trickler daemon logs each pulse's on-time and measured dose during the final
+approach, which is the fastest way to see whether the feed rate has been learned sensibly.
 
+Deploy is a `git pull` into `/code/open-trickler-peripheral` followed by a restart. Make
+sure the whole tree updates — `trickler/main.py`, `scales.py` and `helpers.py` depend on
+each other, and a partial update fails in ways that are hard to read:
 
-## Customizing Your Open Trickler
+```bash
+cd /code/open-trickler-peripheral && git status --short   # should be empty
+sudo systemctl restart opentrickler
+```
 
-To make it easier for anyone to customize and tinker with the software code on their Open Trickler, a `CODE` partition has been added which will appear after you flash your SD card using one of the images listed in this document. The `CODE` partition contains the same Python code you see in this GitHub repository. If you change the code on your SD card, your Open Trickler will run it -- simple!
+## Developer setup
 
+```bash
+sudo apt install memcached
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-to-freeze.txt
+```
 
-## For Developers
+`utilities/` holds standalone hardware tests for the servo, the display, and logging.
+`trickler/motors.py` and `trickler/scales.py` can each be run directly against a config
+file to exercise the hardware on its own.
 
-The development SD card image described below provides SSH access to the Raspberry Pi, which is useful for development and advanced debugging.
-The main difference is that SSH access is enabled. Don't use this unless you are familiar with the Linux command line.
-All firmware images are generated using [buildroot](https://buildroot.org/) and **do not have the same utilities available** as [Raspberry Pi OS](https://www.raspberrypi.org/software/).
+## References
 
-1. Clone this repository.
-  I highly recommend making changes on your computer then copying them to the microSD card.
-1. Download the latest **development** firmware image (labeled `_dev`) from the most recent [automated build](https://github.com/ammolytics/opentrickler-buildroot/actions/workflows/build-ot-firmware.yml).
-1. Follow the regular instructions above to flash the image.
-1. You can log into your running Open Trickler over SSH with the following info:  
-  `ssh root@opentrickler.local` (p: `ammolytics`)
-
-
-## Developer Setup Instructions
-
-If you're going to write and test code on your computer, these steps will help you to set up the dependencies.
-
-1. Install memcached  
-  ```sudo apt install memcached```
-1. Pull github branch
-1. Create virtual environment  
-  ```python3 -m venv .venv```
-1. Activate virtual environment  
-  ```source .venv/bin/activate```
-1. Install dependencies  
-  ```pip install -r requirements-to-freeze.txt```
-
-
-# References
-
-- https://github.com/Adam-Langley/pybleno
 - https://onion.io/2bt-pid-control-python/
 - https://github.com/ivmech/ivPID/blob/master/PID.py
-- http://cgkit.sourceforge.net/doc2/pidcontroller.html
-- https://github.com/yamins81/cgkit/blob/6ec3f9b32c0330057d3c2c0bfcba573dac267aac/cgkit/pidcontroller.py
 - https://gpiozero.readthedocs.io/en/stable/api_output.html#gpiozero.PWMOutputDevice
 - https://pythonhosted.org/pyserial/shortintro.html
-- https://realpython.com/python-memcache-efficient-caching/
-- https://github.com/pinterest/pymemcache
 - https://pymemcache.readthedocs.io/en/latest/
 - https://learn.adafruit.com/adafruit-arduino-lesson-13-dc-motors?view=all
+
+## License
+
+MIT, as inherited from the upstream Ammolytics project. See [LICENSE](LICENSE).
+`trickler/PID.py` is from [ivPID](https://github.com/ivmech/ivPID) and is GPL-licensed,
+as noted in its header.

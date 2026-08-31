@@ -15,8 +15,8 @@ import re
 import struct
 import tempfile
 
-import pymemcache.client.base # pylint: disable=import-error;
-import pymemcache.serde # pylint: disable=import-error;
+import pymemcache.client.base
+import pymemcache.serde
 
 
 def get_mc_client(server='127.0.0.1:11211'):

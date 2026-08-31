@@ -14,7 +14,7 @@ import enum
 import logging
 import time
 
-import serial # pylint: disable=import-error;
+import serial
 
 import helpers
 
@@ -32,7 +32,7 @@ def noop(*args, **kwargs):
     return
 
 
-class SerialScale: # pylint: disable=too-many-instance-attributes;
+class SerialScale:
     """Base class for a digital scale connected over a serial port."""
 
     class Units(enum.Enum):
@@ -132,7 +132,7 @@ class SerialScale: # pylint: disable=too-many-instance-attributes;
         cache_hit =  getattr(cls, '__cached_reverse_unit_map', None)
         if cache_hit:
             return cache_hit
-        reversed_map = dict((v, k) for k, v in cls.unit_map.items()) # pylint: disable=no-member;
+        reversed_map = dict((v, k) for k, v in cls.unit_map.items())
         cls.__cached_reverse_unit_map = reversed_map
         return cls.__cached_reverse_unit_map
 
