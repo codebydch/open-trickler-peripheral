@@ -77,7 +77,7 @@ def safe_get(key, default=None):
     """
     try:
         value = memcache_client.get(key)
-    except Exception: # pylint: disable=broad-except;
+    except Exception:
         logging.debug('Could not read %s from memcache.', key, exc_info=True)
         return default
     return default if value is None else value

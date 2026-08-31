@@ -14,7 +14,7 @@ import atexit
 import enum
 import logging
 
-import gpiozero # pylint: disable=import-error;
+import gpiozero
 import pigpio
 
 class TricklerMotor:

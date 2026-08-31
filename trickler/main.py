@@ -271,7 +271,7 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
             remainder, target_unit, weight, scale.unit, on_time, dose)
 
 
-def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger): # pylint: disable=too-many-arguments,too-many-branches,too-many-statements;
+def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger):
     """Main trickler control loop run when all devices are ready, target weight is set, and auto-mode is on."""
     settings = trickler_settings(config, memcache, constants, scale, target_unit)
     logging.debug('trickler settings: %r', settings)
@@ -428,6 +428,7 @@ def main(config, memcache, args, pidtune_logger):
     })
 
     # Outer-most control loop for the whole trickler system.
+    last_status = None
     while 1:
         # Update settings from memcache.
         auto_mode = memcache.get(constants.AUTO_MODE.value)
@@ -442,13 +443,18 @@ def main(config, memcache, args, pidtune_logger):
             logging.info('scale.unit: %r, target_unit: %r', scale.unit, target_unit)
             scale.change_unit()
 
-        logging.info(
-            'target: %s %s scale: %s %s auto_mode: %s',
-            target_weight,
-            target_unit,
-            scale.weight,
-            scale.unit,
-            auto_mode)
+        # Only log when something actually changes. Logging every pass filled the
+        # journal with tens of identical lines a second and buried real errors.
+        status = (target_weight, target_unit, scale.weight, scale.unit, auto_mode)
+        if status != last_status:
+            logging.info(
+                'target: %s %s scale: %s %s auto_mode: %s',
+                target_weight,
+                target_unit,
+                scale.weight,
+                scale.unit,
+                auto_mode)
+            last_status = status
 
         # Powder pan in place, scale stable, ready to trickle.
         if (scale.weight >= 0 and
