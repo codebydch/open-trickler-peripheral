@@ -27,6 +27,14 @@ class ScaleNotReady(ScaleException):
     """Scale not ready."""
 
 
+# Every supported scale terminates a frame the same way.
+LINE_TERMINATOR = b'\r\n'
+
+# If a terminator never arrives the port is misconfigured (wrong baud rate, usually).
+# Cap the buffer rather than growing it forever.
+MAX_BUFFER_BYTES = 4096
+
+
 def noop(*args, **kwargs):
     """No-op function for scales to use on throwaway status updates."""
     return
@@ -79,6 +87,8 @@ class SerialScale:
         # mid-line leaves a partial read that can't be decoded, in which case self.weight
         # still holds the previous reading and callers need to know not to act on it.
         self.is_fresh = False
+        # Bytes read that don't yet form a complete frame, carried to the next read.
+        self._buffer = b''
         self._store_scale_config()
         # Internal storage for scale readings to infer stability, used for scales that don't provide it.
         self._readings = collections.deque(maxlen=int(config['scale']['stable_reading_length']))
@@ -147,6 +157,38 @@ class SerialScale:
         """Returns True if the scale is stable, otherwise False."""
         return self.status == self.StatusMap.STABLE
 
+    def _read_latest_line(self):
+        """Returns the most recent complete frame from the scale, or None.
+
+        The scale streams faster than the control loop needs, so what matters is the
+        newest reading, not the next one. Draining whatever has arrived and keeping the
+        last complete frame avoids the two costs of the old flush-then-readline approach:
+        waiting most of a frame period for fresh bytes, and truncating a frame when the
+        flush landed in the middle of one.
+
+        Latency here is not cosmetic. Powder committed before the loop can react is feed
+        rate times this delay, and that is what sets how early trickling has to stop.
+        """
+        waiting = self._serial.in_waiting
+        if waiting:
+            self._buffer += self._serial.read(waiting)
+        if LINE_TERMINATOR not in self._buffer:
+            # Nothing complete buffered, so wait for a frame rather than spinning.
+            self._buffer += self._serial.readline()
+
+        frames = self._buffer.split(LINE_TERMINATOR)
+        # Anything after the last terminator is a partial frame; keep it for next time.
+        self._buffer = frames.pop()
+        if len(self._buffer) > MAX_BUFFER_BYTES:
+            logging.warning('Discarding %d bytes with no frame terminator. Check the '
+                            'scale baud rate.', len(self._buffer))
+            self._buffer = b''
+        if not frames:
+            return None
+        if len(frames) > 1:
+            logging.debug('Skipped %d superseded scale readings.', len(frames) - 1)
+        return frames[-1]
+
     def change_unit(self):
         """Changes the unit of weight on the scale."""
         raise NotImplementedError('The change_unit() method needs to be defined in a brand-specific scale class.')
@@ -213,9 +255,9 @@ class ANDScale(SerialScale):
         }
 
         self.is_fresh = False
-        # Note: The input buffer can fill up, causing latency. Clear it before reading.
-        self._serial.reset_input_buffer()
-        raw = self._serial.readline()
+        raw = self._read_latest_line()
+        if raw is None:
+            return
         logging.debug(raw)
         try:
             # Remove all leading and trailing whitespace characters then decode from bytestring into unicode.
@@ -330,9 +372,9 @@ class CreedmoorScale(SerialScale):
         }
 
         self.is_fresh = False
-        # Note: The input buffer can fill up, causing latency. Clear it before reading.
-        self._serial.reset_input_buffer()
-        raw = self._serial.readline()
+        raw = self._read_latest_line()
+        if raw is None:
+            return
         logging.debug(raw)
         try:
             # Remove trailing newline characters, then decode from bytestring into unicode.
@@ -409,9 +451,9 @@ class USSolidScale(SerialScale):
         }
 
         self.is_fresh = False
-        # Note: The input buffer can fill up, causing latency. Clear it before reading.
-        self._serial.reset_input_buffer()
-        raw = self._serial.readline()
+        raw = self._read_latest_line()
+        if raw is None:
+            return
         logging.debug(raw)
         try:
             # Remove trailing newline characters, then decode from bytestring into unicode.

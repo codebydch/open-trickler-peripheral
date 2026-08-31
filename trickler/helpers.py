@@ -128,6 +128,11 @@ TRICKLER_SETTINGS = (
         'pulse_off_time', 'Pause after each pulse', '0.1', 0.0, 5.0, 0.05,
         'Seconds to wait for the powder to land before weighing what the pulse delivered.'),
     TricklerSetting(
+        'settle_min_time', 'Minimum settle wait', '0.3', 0.0, 5.0, 0.05,
+        'Seconds after a pulse before a stable reading is believed. Below the scale\'s '
+        'own reporting lag, a pulse gets weighed before its powder has landed, which '
+        'reads as delivering nothing and makes the feeder over-pulse.'),
+    TricklerSetting(
         'pulse_pwm', 'Pulse speed', '25', 0.0, 100.0, 1.0,
         'PWM %. Motor speed while pulsing. Never actually driven below the stall speed.'),
     TricklerSetting(

@@ -22,7 +22,9 @@ The pulse feeder is the part that decides accuracy. A vibratory motor can't be d
 slower than its stall point, so the only way to control how much powder lands is to
 control how long it runs. Each pulse is aimed at a fraction of what's left, fired, and
 then weighed once the scale reports stable — nothing is fed until the last thing fed has
-been measured. The measured dose corrects a running estimate of grains per second of
+been measured. It waits `settle_min_time` before believing that "stable", because for the
+first moment after a pulse the powder is still in the air and the undisturbed pan reads as
+settled at the old weight. The measured dose corrects a running estimate of grains per second of
 motor on-time, so pulse length adapts to the powder instead of being configured. It stops
 when another pulse would miss the target by more than stopping short does.
 
@@ -107,6 +109,17 @@ sudo apt install memcached
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-to-freeze.txt
 ```
+
+Run the tests from the repository root:
+
+```bash
+python -m unittest discover -t . -s tests
+```
+
+They drive the real scale, motor and control-loop classes against a fake serial port and
+a simulated machine, so they run anywhere and cover the parts that are awkward to check
+on the bench: frame parsing, motor clamping, every exit path from a charge, and whether a
+charge actually lands on target. `tests/fakes.py` holds the simulated hardware.
 
 `utilities/` holds standalone hardware tests for the servo, the display, and logging.
 `trickler/motors.py` and `trickler/scales.py` can each be run directly against a config

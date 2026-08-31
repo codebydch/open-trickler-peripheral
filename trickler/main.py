@@ -49,6 +49,15 @@ MIN_PULSE_RATE = 0.02
 # means an empty hopper or a jammed tube, not something more trickling will fix.
 MAX_EMPTY_PULSES = 8
 
+# Backstop on the final approach. Even with the give-up counters above, a pathological
+# cycle should not wedge the daemon on one charge.
+MAX_PULSE_PHASE_SECONDS = 120.0
+
+# Give up on a charge after this long with no usable scale reading at all. Individual
+# reads fail routinely -- the serial line is read faster than the scale writes to it --
+# so this has to be far longer than any normal gap between frames.
+STALE_READ_TIMEOUT = 5.0
+
 TricklerSettings = collections.namedtuple('TricklerSettings', (
     'fine_trickle_weight',
     'pulse_trickle_weight',
@@ -56,6 +65,7 @@ TricklerSettings = collections.namedtuple('TricklerSettings', (
     'pulse_min_on_time',
     'pulse_off_time',
     'pulse_pwm',
+    'settle_min_time',
     'stall_pwm',
     'pulse_rate',
     'pulse_aim',
@@ -122,6 +132,11 @@ class PulseFeeder:
         self.empty_pulses = 0
 
     @property
+    def settings(self):
+        """The trickler settings this feeder was built with."""
+        return self._settings
+
+    @property
     def rate(self):
         """Weight delivered per second of motor on-time, as currently learned."""
         return self._rate
@@ -135,12 +150,22 @@ class PulseFeeder:
         """True once another pulse would miss the target by more than stopping short does."""
         return remainder <= max(self.min_dose / 2, self._settings.cutoff_weight)
 
-    def settled_weight(self):
-        """Reads the scale until it reports a stable weight, or the settle time runs out."""
-        deadline = time.time() + self._settings.settle_timeout
+    def settled_weight(self, min_wait=0.0):
+        """Reads the scale until it reports a stable weight, or the settle time runs out.
+
+        `min_wait` is the time that must pass before a stable reading is believed. It
+        matters more than it looks: for the first moment after a pulse the powder is
+        still in the air, so the pan is undisturbed and the scale happily reports the
+        *old* weight as stable. Trusting that reads the pulse as having delivered
+        nothing, and the one after it as having delivered double.
+        """
+        start = time.time()
+        deadline = start + self._settings.settle_timeout
         while time.time() < deadline:
             self._scale.update()
-            if self._scale.is_fresh and self._scale.is_stable:
+            if time.time() - start < min_wait:
+                continue
+            if getattr(self._scale, 'is_fresh', True) and self._scale.is_stable:
                 break
         return self._scale.weight
 
@@ -158,7 +183,7 @@ class PulseFeeder:
         self._motor.off()
         # Let the powder land before asking the scale what happened.
         time.sleep(self._settings.pulse_off_time)
-        dose = self.settled_weight() - before
+        dose = self.settled_weight(self._settings.settle_min_time) - before
         self._learn(on_time, dose)
         return on_time, dose
 
@@ -170,8 +195,11 @@ class PulseFeeder:
     def _learn(self, on_time, dose):
         """Folds one measured pulse into the running feed-rate estimate."""
         if dose < 0:
-            # Pan knocked or scale drifted. Nothing worth learning from this one.
+            # Pan knocked, or the scale drifted down. The rate estimate can't learn
+            # anything from it, but it still counts as a pulse that got us no closer --
+            # otherwise a run of them loops here forever.
             logging.debug('Ignoring negative pulse dose: %r', dose)
+            self.empty_pulses += 1
             return
         # A pulse that delivered nothing drags the rate down, which lengthens the next
         # pulse. That's the correction we want, so zero doses are learned from too.
@@ -183,6 +211,21 @@ class PulseFeeder:
             on_time, dose, self._rate, self.min_dose)
         if self._memcache is not None and self._constants is not None:
             self._memcache.set(self._constants.TRICKLER_PULSE_RATE.value, self._rate)
+
+
+def seed_memcache(memcache, values, overwrite=None):
+    """Writes `values` into memcache, keeping anything that is already set.
+
+    Startup should not destroy live state: another process, or the user, may already have
+    set a target weight and turned auto mode on. `overwrite` names the keys to write
+    regardless, for values that were given explicitly on the command line.
+    """
+    overwrite = overwrite or {}
+    for key, value in values.items():
+        if overwrite.get(key) or memcache.get(key) is None:
+            memcache.set(key, value)
+        else:
+            logging.debug('Keeping existing memcache value for %s', key)
 
 
 def trickler_settings(config, memcache, constants, scale, target_unit):
@@ -213,6 +256,7 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
         pulse_min_on_time=float(section['pulse_min_on_time']),
         pulse_off_time=float(section['pulse_off_time']),
         pulse_pwm=float(section['pulse_pwm']),
+        settle_min_time=float(section['settle_min_time']),
         stall_pwm=float(section['stall_pwm']),
         # The seed rate is in grains per second; convert it the same way as the weights.
         pulse_rate=decimal.Decimal(section['pulse_rate']) * factor,
@@ -232,9 +276,16 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
     is fed until the last thing fed has been weighed.
     """
     logging.info('Starting final approach. Learned rate: %r', feeder.rate)
-    weight = feeder.settled_weight()
+    weight = feeder.settled_weight(feeder.settings.settle_min_time)
+    started = time.time()
 
     while 1:
+        if time.time() - started > MAX_PULSE_PHASE_SECONDS:
+            logging.warning(
+                'Final approach ran for %ss without finishing, stopping. remainder: %s %s',
+                MAX_PULSE_PHASE_SECONDS, target_weight - weight, target_unit)
+            return
+
         # Stop running if auto mode is disabled.
         if not memcache.get(constants.AUTO_MODE.value):
             logging.debug('auto mode disabled.')
@@ -277,7 +328,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
     logging.debug('trickler settings: %r', settings)
     feed_rate = FeedRateEstimator(settings.rate_window)
     feeder = PulseFeeder(trickler_motor1, scale, settings, memcache, constants)
-    stale_reads = 0
+    stale_since = None
     pidtune_logger.info('timestamp, input (motor %), output (weight %)')
     logging.info('Starting trickling process...')
 
@@ -293,16 +344,22 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
             # Read scale values (weight/unit/stable)
             scale.update()
 
-            # The read can come back as a partial line, which leaves the previous weight
-            # in place. Acting on it would mean deciding twice on one reading, so skip
-            # the pass -- but don't let the motors run blind for long if it keeps up.
-            if not scale.is_fresh:
-                stale_reads += 1
-                if stale_reads >= settings.rate_window:
-                    logging.warning('No usable scale readings, stopping. Check the serial link.')
+            # The read can come back without a usable weight, which leaves the previous
+            # reading in place. Acting on it would mean deciding twice on one reading, so
+            # skip the pass. A few in a row is normal traffic; only a sustained silence
+            # means the serial link is actually gone.
+            # getattr, because scales.py is a file people customise and a scale class
+            # without the flag should behave as it did before the flag existed.
+            if not getattr(scale, 'is_fresh', True):
+                if stale_since is None:
+                    stale_since = time.time()
+                elif time.time() - stale_since >= STALE_READ_TIMEOUT:
+                    logging.warning(
+                        'No usable scale reading for %ss, stopping. Check the serial link.',
+                        STALE_READ_TIMEOUT)
                     break
                 continue
-            stale_reads = 0
+            stale_since = None
 
             # Stop running if scale's unit no longer matches target unit.
             if scale.unit != target_unit:
@@ -420,11 +477,18 @@ def main(config, memcache, args, pidtune_logger):
             logging.debug('scale: %r', scale)
             break
 
-    # Set initial values in memcache.
-    memcache.set_multi({
+    # Seed memcache, without disturbing anything already set. A restart used to stamp
+    # these defaults over whatever the user had entered, so any crash silently threw away
+    # the target weight and switched auto mode off -- which hid the crash itself.
+    # Values given explicitly on the command line still win.
+    seed_memcache(memcache, {
         constants.AUTO_MODE.value: args.auto_mode or False,
         constants.TARGET_WEIGHT.value: args.target_weight or decimal.Decimal('0.0'),
         constants.TARGET_UNIT.value: scale.unit_map.get(args.target_unit, 'GN'),
+    }, overwrite={
+        constants.AUTO_MODE.value: bool(args.auto_mode),
+        constants.TARGET_WEIGHT.value: bool(args.target_weight),
+        constants.TARGET_UNIT.value: False,
     })
 
     # Outer-most control loop for the whole trickler system.
@@ -462,19 +526,29 @@ def main(config, memcache, args, pidtune_logger):
                 scale.unit == target_unit and
                 scale.is_stable and
                 auto_mode):
-            # Stops the servo from dumping powder twice if the scale weight dips below the target weight
-            if ((target_weight - scale.weight) / target_weight) >= 0.5:
-                # Wait a second to dump powder and start trickling.
+            # One bad charge should cost a charge, not the daemon. Dying here takes the
+            # service down with it, and the restart wipes the log context along with the
+            # settings, which makes the original error very hard to find.
+            try:
+                # Stops the servo from dumping powder twice if the scale weight dips below the target weight
+                if ((target_weight - scale.weight) / target_weight) >= 0.5:
+                    # Wait a second to dump powder and start trickling.
+                    time.sleep(1)
+                    logging.info('Starting powder dump...')
+                    servo_motor.run_servo()
+                    time.sleep(1.5)
+                    servo_motor.set_initial_angle()
+                    # Required since the larger powder drop hitting the cup may overshoot the weight until settling
+                    time.sleep(1)
+                    logging.info('Completed powder dump.')
+                # Run trickler loop.
+                trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)
+            except Exception:
+                logging.exception('Charge failed. Motors stopped; the trickler is still running.')
+                trickler_motor1.off()
+                trickler_motor2.off()
+                # Don't spin on a fault that repeats every pass.
                 time.sleep(1)
-                logging.info('Starting powder dump...')
-                servo_motor.run_servo()
-                time.sleep(1.5)
-                servo_motor.set_initial_angle()
-                # Required since the larger powder drop hitting the cup may overshoot the weight until settling
-                time.sleep(1)
-                logging.info('Completed powder dump.')
-            # Run trickler loop.
-            trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)
 
 
 if __name__ == '__main__':
