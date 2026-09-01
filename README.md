@@ -57,9 +57,21 @@ and are written back to `opentrickler_config.ini` so they survive a reboot.
 
 ## Install
 
-See [`setup.txt`](setup.txt) for the full walkthrough — swap size, the `/code` directory,
-the virtualenv, Adafruit Blinka for the screen, memcached, nginx, websocketd, and
-enabling the services in [`system/`](system).
+On a fresh Raspberry Pi OS image, in two parts. The split is where Adafruit Blinka
+forces a reboot:
+
+```bash
+git clone https://github.com/codebydch/open-trickler-peripheral.git
+./open-trickler-peripheral/install-part1.sh    # system packages, venv, Blinka
+sudo reboot
+/code/open-trickler-peripheral/install-part2.sh # websocketd, nginx, the services
+```
+
+Run them as your normal login user, not with `sudo` — they call it themselves. Both are
+safe to re-run, and part 2 checks that part 1 has been done before it starts.
+
+[`setup.txt`](setup.txt) documents the same steps by hand, if you would rather do it
+yourself or want to see what the scripts are doing.
 
 ## Configuration
 
@@ -104,14 +116,21 @@ systemctl status opentrickler --no-pager
 The trickler daemon logs each pulse's on-time and measured dose during the final
 approach, which is the fastest way to see whether the feed rate has been learned sensibly.
 
-Deploy is a `git pull` into `/code/open-trickler-peripheral` followed by a restart. Make
-sure the whole tree updates — `trickler/main.py`, `scales.py` and `helpers.py` depend on
-each other, and a partial update fails in ways that are hard to read:
+To update, use [`update.sh`](update.sh) rather than a bare `git pull`:
 
 ```bash
-cd /code/open-trickler-peripheral && git status --short   # should be empty
-sudo systemctl restart opentrickler
+/code/open-trickler-peripheral/update.sh
 ```
+
+A pull on its own is not enough. nginx serves *copies* of the pages from `/var/www/html`
+and the unit files live in `/etc/systemd/system`, so both go stale. The script pulls,
+republishes the pages, refreshes the services and restarts them.
+
+It refuses to run with a dirty working tree, and says which files are modified. Take that
+seriously: `opentrickler_config.ini` is tracked, so anything you tuned by hand shows up
+there — don't discard it without looking. A partial update is also how the hardest bug in
+this project happened: `trickler/main.py`, `scales.py` and `helpers.py` depend on each
+other, and a mismatched set fails in ways that are hard to read.
 
 ## Developer setup
 
