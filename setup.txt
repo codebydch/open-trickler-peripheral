@@ -1,3 +1,14 @@
+# Manual install reference.
+#
+# install-part1.sh and install-part2.sh do all of this for you. Keep this file as the
+# explanation of what those scripts are doing, or follow it by hand if you would rather.
+#
+# The scripts differ from these notes in three ways, all deliberate:
+#   - Python packages come from requirements-to-freeze.txt rather than being installed
+#     one at a time, so there is one list to keep correct.
+#   - websocketd is chosen to match the CPU (see below).
+#   - the nginx sites-enabled symlink is ensured rather than assumed.
+
 # Raspberry Pi Zeros have a small default swap size which causes your device to crash when updating
 # Edit the file /etc/dphys-swapfile and change CONF_SWAPSIZE to 2048
 # Reboot and then before doing anything enter the command "swapon"
@@ -45,11 +56,17 @@ cd /code/open-trickler-peripheral/html
 sudo cp *.html /var/www/html/
 cd /code/open-trickler-peripheral/nginx/
 sudo cp default /etc/nginx/sites-available/
+# A stock Raspberry Pi OS image already links this; a tidied one may not.
+sudo ln -sfn /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
 
 # websocketd install
+# linux_arm is 32-bit; use linux_arm64 on a 64-bit Raspberry Pi OS. Check with `uname -m`:
+#   armv6l / armv7l -> websocketd-0.4.1-linux_arm.zip
+#   aarch64         -> websocketd-0.4.1-linux_arm64.zip
 cd /code
-wget https://github.com/joewalnes/websocketd/releases/download/v0.3.0/websocketd-0.3.0-linux_arm.zip
-unzip -d websocketd websocketd-0.3.0-linux_arm.zip
+wget https://github.com/joewalnes/websocketd/releases/download/v0.4.1/websocketd-0.4.1-linux_arm.zip
+unzip -d websocketd websocketd-0.4.1-linux_arm.zip
 cd websocketd
 sudo cp websocketd /usr/sbin
 
@@ -59,6 +76,9 @@ sudo apt-get install pigpio
 sudo systemctl enable pigpiod
 sudo systemctl daemon-reload
 pip install pigpio
+
+# Charge history directory (the trickler creates it, but do it here so ownership is sane)
+sudo mkdir -p /var/lib/opentrickler
 
 # systemctl scripts install
 cd /code/open-trickler-peripheral/system/
@@ -73,9 +93,10 @@ sudo systemctl enable websocketd-4.service
 sudo systemctl enable websocketd-5.service
 sudo systemctl daemon-reload
 
-# install Flask
+# All Python dependencies in one go (the scripts do only this)
 cd /code
-pip install Flask
+source venv/bin/activate
+pip install -r /code/open-trickler-peripheral/requirements-to-freeze.txt
 
 # reboot
 sudo reboot
