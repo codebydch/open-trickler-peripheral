@@ -1,0 +1,23 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        # Only what the tests import. The screen libraries (Pillow, Adafruit Blinka) are
+        # Pi-only and screen.py is not under test, so the full requirements file is not
+        # installable on a runner.
+        run: pip install pyserial gpiozero pigpio pymemcache flask
+      - name: Run tests
+        run: python -m unittest discover -t . -s tests -v

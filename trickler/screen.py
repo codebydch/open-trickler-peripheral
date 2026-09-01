@@ -29,10 +29,14 @@ class MiniPiTFTApp:
         self.colors = colors
         self.memcache_client = memcache_client
 
-        # Initialize variables
-        self.target_weight = target_weight
-        self.auto_mode = auto_mode
-        
+        # Adopt whatever is already set rather than stamping these defaults over it.
+        # Starting the screen used to reset the target weight and switch auto mode off,
+        # so a screen restart silently cancelled what the user had dialled in.
+        self.target_weight = self.get_memcache_value(
+            self.constants.TARGET_WEIGHT.value, target_weight)
+        self.auto_mode = self.get_memcache_value(
+            self.constants.AUTO_MODE.value, auto_mode)
+
         self.set_memcache_value(self.constants.TARGET_WEIGHT.value, self.target_weight)
         self.set_memcache_value(self.constants.AUTO_MODE.value, self.auto_mode)
 

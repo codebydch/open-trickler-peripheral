@@ -100,6 +100,30 @@ def current_trickler_settings():
     return values, bool(overrides)
 
 
+def active_profile():
+    """The powder profile in force: the live selection, else the config file's."""
+    selected = safe_get(constants.ACTIVE_PROFILE.value)
+    if selected is None and config.has_section('profiles'):
+        selected = config['profiles'].get('active', '')
+    return selected or ''
+
+
+def learned_rate(profile=None):
+    """The feed rate learned for a profile, or None if it hasn't learned one yet."""
+    profile = active_profile() if profile is None else profile
+    key = constants.TRICKLER_PULSE_RATE.value
+    return safe_get('%s:%s' % (key, profile) if profile else key)
+
+
+def history_path():
+    """Where the trickler is writing charge history, or '' if it is switched off."""
+    if not config.has_section('history'):
+        return ''
+    if not config['history'].getboolean('enabled', True):
+        return ''
+    return config['history'].get('path', '')
+
+
 def render_config(errors=None, notice=None):
     """Renders the tuning page with whatever values are currently in force."""
     values, live = current_trickler_settings()
@@ -109,7 +133,70 @@ def render_config(errors=None, notice=None):
         values=values,
         live=live,
         errors=errors or {},
-        notice=notice)
+        notice=notice,
+        profiles=helpers.list_profiles(config),
+        profile=active_profile(),
+        learned_rate=learned_rate())
+
+
+@app.route('/app/history')
+def history():
+    """Every charge the trickler has recorded, with the spread that matters."""
+    rows = helpers.read_charges(history_path()) if history_path() else []
+    wanted = request.args.get('profile', '')
+    if wanted:
+        rows = [row for row in rows if row.get('profile') == wanted]
+    return render_template(
+        'history.html',
+        rows=list(reversed(rows))[:100],
+        stats=helpers.charge_statistics(rows),
+        profiles=sorted({row.get('profile', '') for row in helpers.read_charges(history_path())} - {''}) if history_path() else [],
+        selected=wanted,
+        enabled=bool(history_path()))
+
+
+@app.route('/app/history.json')
+def history_json():
+    """The same data as /app/history, for anything that would rather have it raw."""
+    rows = helpers.read_charges(history_path()) if history_path() else []
+    return jsonify(rows=rows, stats=helpers.charge_statistics(rows))
+
+
+@app.route('/app/profile', methods=['POST'])
+def update_profile():
+    """Selects, saves or deletes a powder profile."""
+    name = (request.form.get('profile') or '').strip()
+
+    if 'select' in request.form:
+        set_memcache_value(constants.ACTIVE_PROFILE.value, name)
+        notice = 'Using %s.' % name if name else 'Using the plain [trickler] settings.'
+        try:
+            helpers.update_ini_section(args.config_file, 'profiles', {'active': name})
+        except OSError as exc:
+            notice += ' It will not survive a restart: %s could not be written (%s).' % (
+                args.config_file, exc)
+        return render_config(notice=notice)
+
+    if 'save' in request.form:
+        if not name:
+            return render_config(notice='Give the profile a name before saving it.')
+        # Store the values currently in force, plus whatever rate has been learned, so a
+        # profile captures a setup that is known to work.
+        values, _ = current_trickler_settings()
+        rate = learned_rate(name) or learned_rate()
+        if rate:
+            values['pulse_rate'] = '%g' % float(rate)
+        try:
+            helpers.update_ini_section(args.config_file, helpers.profile_section(name), values)
+            config.read(args.config_file)
+        except OSError as exc:
+            return render_config(notice='Could not write %s: %s' % (args.config_file, exc))
+        set_memcache_value(constants.ACTIVE_PROFILE.value, name)
+        return render_config(
+            notice='Saved %s, including a learned feed rate of %s.'
+                   % (name, values.get('pulse_rate', 'the configured default')))
+
+    return render_config(notice='Nothing to do.')
 
 
 @app.route('/app/config/')
@@ -122,7 +209,9 @@ def trickler_config():
 def update_trickler_config():
     """Applies submitted tuning values live, and writes them back to the config file."""
     if 'reset_learned' in request.form:
-        memcache_client.delete(constants.TRICKLER_PULSE_RATE.value)
+        key = constants.TRICKLER_PULSE_RATE.value
+        profile = active_profile()
+        memcache_client.delete('%s:%s' % (key, profile) if profile else key)
         logging.info('Cleared the learned pulse rate.')
         return render_config(
             notice='Learned pulse rate cleared. The next charge starts from the '
@@ -152,7 +241,7 @@ def status():
     """Live readings for the tuning page, polled by the browser."""
     weight = safe_get(constants.SCALE_WEIGHT.value)
     speed = safe_get(constants.TRICKLER_MOTOR_SPEED.value)
-    rate = safe_get(constants.TRICKLER_PULSE_RATE.value)
+    rate = learned_rate()
     target = safe_get(constants.TARGET_WEIGHT.value)
     return jsonify(
         scale_weight=None if weight is None else str(weight),
@@ -160,7 +249,8 @@ def status():
         target_weight=None if target is None else str(target),
         auto_mode=bool(safe_get(constants.AUTO_MODE.value, False)),
         motor_speed=None if speed is None else round(float(speed), 3),
-        pulse_rate=None if rate is None else round(float(rate), 4))
+        pulse_rate=None if rate is None else round(float(rate), 4),
+        profile=active_profile())
 
 
 @app.route('/app/')

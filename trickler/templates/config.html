@@ -109,6 +109,33 @@
         margin-top: 16px;
         font-size: 14px;
       }
+      .profile {
+        border: 1px solid #e9ecef;
+        border-radius: 6px;
+        padding: 12px;
+        margin-bottom: 16px;
+      }
+      .profile label {
+        font-size: 16px;
+        font-weight: bold;
+        display: block;
+      }
+      .profile p {
+        font-size: 13px;
+        color: #6c757d;
+        margin: 4px 0 8px;
+        line-height: 1.4;
+      }
+      .profile select {
+        padding: 9px;
+        font-size: 15px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+      }
+      .profile .learned {
+        margin: 10px 0 0;
+        color: #495057;
+      }
     </style>
   </head>
   <body>
@@ -128,6 +155,30 @@
         <div>Learned feed rate<span id="rate">&mdash;</span></div>
         <div>Auto mode<span id="auto">&mdash;</span></div>
         <div>Scale reading<span id="stable">&mdash;</span></div>
+      </div>
+
+      <div class="profile">
+        <form method="post" action="/app/profile">
+          <label for="profile">Powder profile</label>
+          <p>
+            Each profile keeps its own learned feed rate, so switching powder doesn't mean
+            learning it again. Saving stores the settings below plus the rate learned so
+            far &mdash; do it once a powder is throwing well.
+          </p>
+          <select id="profile" name="profile">
+            <option value="">(none &mdash; use the settings below)</option>
+            {% for name in profiles %}
+              <option value="{{ name }}" {% if name == profile %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" name="select">Use</button>
+          <button type="submit" name="save" class="secondary">Save current settings to it</button>
+        </form>
+        <p class="learned">
+          {% if profile %}Using <strong>{{ profile }}</strong>.{% else %}No profile selected.{% endif %}
+          Learned feed rate:
+          <strong>{% if learned_rate %}{{ '%.4f'|format(learned_rate|float) }} /s{% else %}not learned yet{% endif %}</strong>
+        </p>
       </div>
 
       {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
@@ -162,6 +213,7 @@
       </form>
 
       <p class="links">
+        <a href="/app/history">Charge History</a> &middot;
         <a href="/app/">Control Panel</a> &middot;
         <a href="/">All pages</a>
       </p>

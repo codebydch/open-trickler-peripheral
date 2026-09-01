@@ -8,8 +8,10 @@ https://github.com/ammolytics/projects/tree/develop/trickler
 """
 import array
 import collections
+import csv
 import decimal
 import logging
+import math
 import os
 import re
 import struct
@@ -128,6 +130,11 @@ TRICKLER_SETTINGS = (
         'pulse_off_time', 'Pause after each pulse', '0.1', 0.0, 5.0, 0.05,
         'Seconds to wait for the powder to land before weighing what the pulse delivered.'),
     TricklerSetting(
+        'settle_min_time', 'Minimum settle wait', '0.3', 0.0, 5.0, 0.05,
+        'Seconds after a pulse before a stable reading is believed. Below the scale\'s '
+        'own reporting lag, a pulse gets weighed before its powder has landed, which '
+        'reads as delivering nothing and makes the feeder over-pulse.'),
+    TricklerSetting(
         'pulse_pwm', 'Pulse speed', '25', 0.0, 100.0, 1.0,
         'PWM %. Motor speed while pulsing. Never actually driven below the stall speed.'),
     TricklerSetting(
@@ -212,7 +219,10 @@ def update_ini_section(path, section, values):
                     if lines[i].lstrip().startswith('[')), len(lines))
         written = set()
         for i in range(start + 1, end):
-            match = re.match(r'^(\s*)([A-Za-z0-9_]+)(\s*=\s*).*$', lines[i])
+            # Horizontal whitespace only: \s would match the line's own newline, so a
+            # key with an empty value ("active =") had its terminator swallowed into the
+            # separator and the replacement was written across two lines.
+            match = re.match(r'^([^\S\n]*)([A-Za-z0-9_]+)([^\S\n]*=[^\S\n]*)', lines[i])
             if match and match.group(2) in values:
                 key = match.group(2)
                 lines[i] = '%s%s%s%s\n' % (
@@ -232,3 +242,129 @@ def update_ini_section(path, section, values):
         if os.path.exists(handle.name):
             os.unlink(handle.name)
         raise
+
+
+# --- Charge history -------------------------------------------------------------------
+
+# One row per charge. Written only by the trickler daemon (which runs as root) and read
+# by the web app (which runs as pi); a single writer keeps the file permissions simple.
+HISTORY_COLUMNS = (
+    'timestamp',
+    'profile',
+    'outcome',
+    'target',
+    'final',
+    'error',
+    'unit',
+    'pulses',
+    'seconds',
+    'learned_rate',
+)
+
+
+def append_charge(path, row, max_rows=500):
+    """Appends one charge to the history file, trimming the oldest rows past `max_rows`.
+
+    Creates the file and its directory on first use. Raises OSError if the file cannot be
+    written; callers on the trickler side should log and carry on rather than let a full
+    SD card stop someone reloading.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    rows = read_charges(path)
+    rows.append({column: str(row.get(column, '')) for column in HISTORY_COLUMNS})
+    # Keep the newest max_rows so the file can't grow without bound on an SD card.
+    if max_rows and len(rows) > max_rows:
+        rows = rows[-max_rows:]
+
+    handle = tempfile.NamedTemporaryFile(
+        'w', encoding='utf-8', dir=directory or '.', delete=False, newline='')
+    try:
+        with handle:
+            writer = csv.DictWriter(handle, fieldnames=HISTORY_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(handle.name, path)
+        os.chmod(path, 0o644)
+    except BaseException:
+        if os.path.exists(handle.name):
+            os.unlink(handle.name)
+        raise
+
+
+def read_charges(path):
+    """Returns every recorded charge as a list of dicts, oldest first.
+
+    A missing or unreadable file reads as no history rather than an error: the page
+    should say "nothing recorded yet", not fail.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', newline='') as handle:
+            return [dict(row) for row in csv.DictReader(handle)
+                    if row.get('timestamp')]
+    except (OSError, csv.Error):
+        logging.debug('No readable charge history at %s', path, exc_info=True)
+        return []
+
+
+def charge_statistics(rows, tolerance=0.02):
+    """Summarises completed charges: how many, how far off, and how many were good.
+
+    `within` is the share of charges inside +/- `tolerance` of target, which is the
+    number that actually answers "is this machine accurate enough?".
+    """
+    errors = []
+    for row in rows:
+        if row.get('outcome') != 'complete':
+            continue
+        try:
+            errors.append(float(row['error']))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if not errors:
+        return {'count': 0, 'mean': None, 'sigma': None, 'low': None, 'high': None,
+                'within': None, 'tolerance': tolerance}
+
+    mean = sum(errors) / len(errors)
+    # Population standard deviation: this is the whole record, not a sample of it.
+    sigma = math.sqrt(sum((e - mean) ** 2 for e in errors) / len(errors))
+    within = sum(1 for e in errors if abs(e) <= tolerance) / len(errors)
+    return {
+        'count': len(errors),
+        'mean': mean,
+        'sigma': sigma,
+        'low': min(errors),
+        'high': max(errors),
+        'within': within,
+        'tolerance': tolerance,
+    }
+
+
+# --- Powder profiles ------------------------------------------------------------------
+
+# Profiles live in the config file as [profile:Name] sections. The web app writes them
+# through update_ini_section() -- it already writes that file -- and the trickler only
+# reads. Keeping one writer avoids a root-owned file the web app could never update.
+PROFILE_PREFIX = 'profile:'
+
+
+def profile_section(name):
+    """The config section name holding a profile's settings."""
+    return '%s%s' % (PROFILE_PREFIX, name)
+
+
+def list_profiles(config):
+    """Names of every profile defined in the config file, sorted."""
+    return sorted(section[len(PROFILE_PREFIX):] for section in config.sections()
+                  if section.startswith(PROFILE_PREFIX))
+
+
+def profile_settings(config, name):
+    """The [trickler] overrides a profile carries, or {} if it has none."""
+    if not name:
+        return {}
+    section = profile_section(name)
+    return dict(config[section]) if config.has_section(section) else {}
