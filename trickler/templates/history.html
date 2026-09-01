@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>OpenTrickler Charge History</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f8f9fa;
+        margin: 0;
+        padding: 20px 10px;
+      }
+      .container {
+        background-color: #ffffff;
+        border-radius: 8px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        padding: 20px;
+        max-width: 780px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin-top: 0;
+        font-size: 24px;
+        text-align: center;
+      }
+      .stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        background-color: #f1f3f5;
+        border-radius: 6px;
+        padding: 12px;
+        margin: 16px 0;
+      }
+      .stats div {
+        flex: 1 1 30%;
+        font-size: 14px;
+      }
+      .stats span {
+        display: block;
+        font-size: 20px;
+        font-weight: bold;
+        margin-top: 3px;
+      }
+      .headline span { color: #155724; }
+      .headline.poor span { color: #b02a37; }
+      .warn {
+        background-color: #fff3cd;
+        color: #856404;
+        border-radius: 4px;
+        padding: 10px;
+        font-size: 15px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+      th, td {
+        text-align: right;
+        padding: 6px 8px;
+        border-bottom: 1px solid #e9ecef;
+        white-space: nowrap;
+      }
+      th:first-child, td:first-child,
+      th:nth-child(2), td:nth-child(2) { text-align: left; }
+      th { border-bottom: 2px solid #ced4da; }
+      tr.over td.error { color: #b02a37; }
+      tr.under td.error { color: #0b5ed7; }
+      tr.incomplete { color: #868e96; font-style: italic; }
+      .scroll { overflow-x: auto; }
+      form { margin-bottom: 16px; font-size: 14px; }
+      select, button {
+        padding: 8px;
+        font-size: 15px;
+        border-radius: 4px;
+        border: 1px solid #ced4da;
+      }
+      button {
+        color: #ffffff;
+        background-color: #007bff;
+        border: none;
+        cursor: pointer;
+      }
+      button:hover { background-color: #0056b3; }
+      .links { text-align: center; margin-top: 16px; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Charge History</h1>
+
+      {% if not enabled %}
+        <p class="warn">
+          Recording is switched off. Set <code>enabled = True</code> in the
+          <code>[history]</code> section of the config file to start keeping a record.
+        </p>
+      {% elif stats.count == 0 %}
+        <p class="warn">No completed charges recorded yet.</p>
+      {% else %}
+        <div class="stats">
+          <div class="headline {% if stats.within < 0.9 %}poor{% endif %}">
+            Within &plusmn;{{ '%.2f'|format(stats.tolerance) }} gn
+            <span>{{ '%.0f'|format(stats.within * 100) }}%</span>
+          </div>
+          <div>Mean error<span>{{ '%+.3f'|format(stats.mean) }}</span></div>
+          <div>Std deviation<span>{{ '%.3f'|format(stats.sigma) }}</span></div>
+          <div>Worst under<span>{{ '%+.3f'|format(stats.low) }}</span></div>
+          <div>Worst over<span>{{ '%+.3f'|format(stats.high) }}</span></div>
+          <div>Charges<span>{{ stats.count }}</span></div>
+        </div>
+      {% endif %}
+
+      {% if profiles %}
+        <form method="get" action="/app/history">
+          <label for="profile">Powder:</label>
+          <select id="profile" name="profile">
+            <option value="">All</option>
+            {% for name in profiles %}
+              <option value="{{ name }}" {% if name == selected %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit">Show</button>
+        </form>
+      {% endif %}
+
+      {% if rows %}
+        <div class="scroll">
+          <table>
+            <tr>
+              <th>When</th><th>Powder</th><th>Target</th><th>Actual</th>
+              <th>Error</th><th>Pulses</th><th>Time</th><th>Rate</th>
+            </tr>
+            {% for row in rows %}
+              {% set complete = row.outcome == 'complete' %}
+              <tr class="{% if not complete %}incomplete{% elif row.error|float > 0 %}over{% elif row.error|float < 0 %}under{% endif %}">
+                <td>{{ row.timestamp|replace('T', ' ') }}</td>
+                <td>{{ row.profile or '—' }}</td>
+                <td>{{ row.target }}</td>
+                <td>{{ row.final if complete else row.outcome }}</td>
+                <td class="error">{{ '%+.3f'|format(row.error|float) if complete else '' }}</td>
+                <td>{{ row.pulses }}</td>
+                <td>{{ row.seconds }}s</td>
+                <td>{{ row.learned_rate }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        </div>
+      {% endif %}
+
+      <p class="links">
+        <a href="/app/config/">Tuning</a> &middot;
+        <a href="/app/">Control Panel</a> &middot;
+        <a href="/app/history.json">Raw data</a> &middot;
+        <a href="/">All pages</a>
+      </p>
+    </div>
+  </body>
+</html>

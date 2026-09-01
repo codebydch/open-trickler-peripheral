@@ -90,9 +90,15 @@ class UpdateIniTest(unittest.TestCase):
         helpers.update_ini_section(self.path, 'trickler', {'brand_new_key': '1.25'})
         self.assertEqual(self._read()['trickler']['brand_new_key'], '1.25')
 
+    def test_a_key_with_an_empty_value_is_replaced_cleanly(self):
+        """[profiles] active is empty by default. A separator pattern that swallows the
+        newline writes the value onto its own line and corrupts the file."""
+        helpers.update_ini_section(self.path, 'profiles', {'active': 'Varget'})
+        self.assertEqual(self._read()['profiles']['active'], 'Varget')
+
     def test_a_missing_section_is_created(self):
-        helpers.update_ini_section(self.path, 'history', {'path': '/tmp/charges.csv'})
-        self.assertEqual(self._read()['history']['path'], '/tmp/charges.csv')
+        helpers.update_ini_section(self.path, 'profile:Varget', {'pulse_rate': '0.42'})
+        self.assertEqual(self._read()['profile:Varget']['pulse_rate'], '0.42')
 
 
 class ShippedConfigTest(unittest.TestCase):

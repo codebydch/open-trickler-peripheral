@@ -28,8 +28,15 @@ settled at the old weight. The measured dose corrects a running estimate of grai
 motor on-time, so pulse length adapts to the powder instead of being configured. It stops
 when another pulse would miss the target by more than stopping short does.
 
-That learned rate is kept in memcache between charges and shown on the tuning page. If
-you change powder, clear it there and it re-learns within a few charges.
+That learned rate is kept between charges and shown on the tuning page, scoped to the
+selected **powder profile** — so switching from a stick powder to a ball powder switches
+the estimate rather than blending the two into an average that fits neither. Profiles are
+created from the tuning page and stored as `[profile:Name]` sections in the config file.
+
+Every charge is recorded: target, what it actually weighed, the error, how many pulses it
+took and how long. `/app/history` shows the last hundred with the mean error, standard
+deviation, and the share that landed inside ±0.02 gn — which is the number that answers
+whether the machine is accurate enough.
 
 ## Pages
 
@@ -37,7 +44,8 @@ you change powder, clear it there and it re-learns within a few charges.
 | --- | --- |
 | `/` | Index and links to the log viewers |
 | `/app/` | Control panel: set target weight, toggle auto mode |
-| `/app/config/` | Tuning page: trickler settings, live scale readout, learned feed rate |
+| `/app/config/` | Tuning page: trickler settings, live scale readout, learned feed rate, powder profiles |
+| `/app/history` | Every charge thrown, with mean error, spread, and how many were in tolerance |
 | `/servo/` | Servo control panel, for setting up the powder measure |
 | `/opentrickler.html` | Trickler log |
 | `/screen.html` | Screen log |
@@ -65,6 +73,9 @@ place. The sections worth knowing:
 - `[trickler]` — the final approach. `fine_trickle_weight`, `pulse_trickle_weight`,
   pulse timing, and the learned-rate seed. All weights are in **grains** and converted
   automatically if the scale is set to grams.
+- `[history]` — where charges are recorded (`/var/lib/opentrickler/charges.csv` by
+  default, outside the repo so a `git pull` can't disturb it) and how many rows to keep.
+- `[profiles]` — the powder profile in use; each is a `[profile:Name]` section.
 - `[servo]` — powder measure travel and pulse widths.
 - `[PID]` — gains for the continuous phases only. The pulse feeder does not use the PID.
 

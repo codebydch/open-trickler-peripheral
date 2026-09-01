@@ -184,3 +184,44 @@ class SeedMemcacheTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PulseLearningTest(unittest.TestCase):
+    """What the feeder is allowed to learn from."""
+
+    def feeder(self, resolution='0.02', rate='0.30'):
+        config = fakes.load_config(pulse_rate=rate)
+        scale = mock.Mock()
+        scale.Units = scales.ANDScale.Units
+        scale.resolution = D(resolution)
+        settings = main.trickler_settings(
+            config, None, None, scale, scales.ANDScale.Units.GRAINS)
+        return main.PulseFeeder(mock.Mock(), scale, settings)
+
+    def test_a_measurable_dose_corrects_the_rate(self):
+        feeder = self.feeder()
+        feeder._learn(0.2, D('0.10'))
+        self.assertGreater(feeder.rate, 0.30, 'a fat dose should raise the estimate')
+
+    def test_a_sub_resolution_dose_teaches_nothing(self):
+        """A dose below one scale division reads as zero whether it was zero or most of a
+        division. Learning from it drags the estimate toward nothing and the feeder then
+        over-pulses; the short pulses at the end of every charge are all like this."""
+        feeder = self.feeder()
+        before = feeder.rate
+        feeder._learn(0.05, D('0.00'))
+        self.assertEqual(feeder.rate, before)
+
+    def test_a_sub_resolution_dose_still_counts_as_unproductive(self):
+        """Otherwise a jam would never trip the give-up counter."""
+        feeder = self.feeder()
+        for _ in range(3):
+            feeder._learn(0.05, D('0.00'))
+        self.assertEqual(feeder.empty_pulses, 3)
+
+    def test_a_negative_dose_counts_but_does_not_corrupt_the_rate(self):
+        feeder = self.feeder()
+        before = feeder.rate
+        feeder._learn(0.2, D('-0.04'))
+        self.assertEqual(feeder.rate, before)
+        self.assertEqual(feeder.empty_pulses, 1)

@@ -17,13 +17,31 @@ from tests import CONFIG_PATH
 D = decimal.Decimal
 
 
-def load_config(**trickler_overrides):
-    """Reads the shipped config, optionally overriding values in [trickler]."""
+def load_config(history_path=None, profiles=None, active_profile=None,
+                **trickler_overrides):
+    """Reads the shipped config, with [trickler] overrides and an isolated history.
+
+    Charge history is off unless `history_path` is given: the shipped config points at
+    /var/lib/opentrickler, and a test suite has no business writing there.
+    `profiles` is a mapping of name -> {setting: value}, written as [profile:Name].
+    """
     config = configparser.ConfigParser()
     config.optionxform = str
     config.read(CONFIG_PATH)
     for key, value in trickler_overrides.items():
         config['trickler'][key] = str(value)
+
+    config['history']['enabled'] = 'True' if history_path else 'False'
+    if history_path:
+        config['history']['path'] = str(history_path)
+
+    for name, settings in (profiles or {}).items():
+        section = 'profile:%s' % name
+        config.add_section(section)
+        for key, value in settings.items():
+            config[section][key] = str(value)
+    if active_profile is not None:
+        config['profiles']['active'] = active_profile
     return config
 
 

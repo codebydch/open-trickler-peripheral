@@ -10,6 +10,7 @@ OpenTrickler forked and updated here:
 https://github.com/codebydch/open-trickler-peripheral
 """
 import collections
+import configparser
 import datetime
 import decimal
 import enum
@@ -30,6 +31,11 @@ import scales
 # 4. API
 # 6. Bluetooth?
 # 7: Powder pan/cup?
+
+
+# A stand-in for a config section that isn't in the file, so the typed getters below can
+# be used without checking has_section() first.
+EMPTY_SECTION = configparser.ConfigParser()['DEFAULT']
 
 
 # Grains per gram, used to convert the grain-based trickler thresholds in the
@@ -73,6 +79,9 @@ TricklerSettings = collections.namedtuple('TricklerSettings', (
     'cutoff_weight',
     'rate_window',
     'lookahead_time',
+    'profile',
+    'history_path',
+    'history_max_rows',
 ))
 
 
@@ -125,11 +134,16 @@ class PulseFeeder:
         self._constants = constants
         # Grains (or grams) delivered per second of motor on-time.
         self._rate = float(settings.pulse_rate)
+        self._rate_key = None
         if memcache is not None and constants is not None:
-            learned = memcache.get(constants.TRICKLER_PULSE_RATE.value)
+            # Scoped to the profile, so switching powder switches the estimate instead of
+            # blending two powders into an average that fits neither.
+            self._rate_key = learned_rate_key(constants, settings.profile)
+            learned = memcache.get(self._rate_key)
             if learned:
                 self._rate = max(float(learned), MIN_PULSE_RATE)
         self.empty_pulses = 0
+        self.pulses = 0
 
     @property
     def settings(self):
@@ -178,6 +192,7 @@ class PulseFeeder:
         on_time = min(max(on_time, self._settings.pulse_min_on_time), self._settings.pulse_on_time)
 
         before = self._scale.weight
+        self.pulses += 1
         self._motor.set_speed(self._pulse_speed())
         time.sleep(on_time)
         self._motor.off()
@@ -201,16 +216,65 @@ class PulseFeeder:
             logging.debug('Ignoring negative pulse dose: %r', dose)
             self.empty_pulses += 1
             return
-        # A pulse that delivered nothing drags the rate down, which lengthens the next
-        # pulse. That's the correction we want, so zero doses are learned from too.
+        self.empty_pulses = 0 if dose > 0 else self.empty_pulses + 1
+
+        # A dose smaller than the scale can resolve carries no information: it reads as
+        # zero whether it was zero or most of a division. Learning from it drags the rate
+        # down towards nothing, and the estimate stops describing the machine. The short
+        # pulses at the very end of a charge are all like this.
+        try:
+            resolution = decimal.Decimal(getattr(self._scale, 'resolution', 0))
+        except (TypeError, ValueError, decimal.InvalidOperation):
+            # A scale class that doesn't report a resolution just learns from everything,
+            # as it did before this guard existed.
+            resolution = decimal.Decimal(0)
+        if dose < resolution:
+            logging.debug('Pulse dose %r is below the scale resolution %r; not learning '
+                          'from it.', dose, resolution)
+            return
+
         observed = float(dose) / on_time
         self._rate = max(self._rate + (observed - self._rate) * PULSE_RATE_LEARN, MIN_PULSE_RATE)
-        self.empty_pulses = 0 if dose > 0 else self.empty_pulses + 1
         logging.debug(
             'pulse on_time: %r dose: %r -> rate: %r (min dose %r)',
             on_time, dose, self._rate, self.min_dose)
-        if self._memcache is not None and self._constants is not None:
-            self._memcache.set(self._constants.TRICKLER_PULSE_RATE.value, self._rate)
+        if self._memcache is not None and self._rate_key is not None:
+            self._memcache.set(self._rate_key, self._rate)
+
+
+def learned_rate_key(constants, profile):
+    """The memcache key holding the learned feed rate for one powder profile."""
+    base = constants.TRICKLER_PULSE_RATE.value
+    return '%s:%s' % (base, profile) if profile else base
+
+
+def record_charge(settings, target_weight, final_weight, target_unit, outcome,
+                  pulses, seconds, learned_rate):
+    """Writes one finished charge to the history file.
+
+    Never raises. A history file that cannot be written is a nuisance; a trickler that
+    stops working because of it is not acceptable, so failures are logged and dropped.
+    """
+    if not settings.history_path:
+        return
+    try:
+        helpers.append_charge(settings.history_path, {
+            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+            'profile': settings.profile,
+            'outcome': outcome,
+            'target': target_weight,
+            'final': final_weight,
+            'error': final_weight - target_weight,
+            'unit': getattr(target_unit, 'name', target_unit),
+            'pulses': pulses,
+            'seconds': round(seconds, 1),
+            'learned_rate': round(learned_rate, 4),
+        }, settings.history_max_rows)
+    except Exception:
+        # Called from a finally block, where raising would mask whatever actually ended
+        # the charge. Nothing here is worth losing that for.
+        logging.warning('Could not record the charge to %s', settings.history_path,
+                        exc_info=True)
 
 
 def seed_memcache(memcache, values, overwrite=None):
@@ -240,12 +304,23 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
     tuned in, so they need converting when the scale is set to grams.
     """
     overrides = {}
+    profile = ''
     if memcache is not None and constants is not None:
         overrides = memcache.get(constants.TRICKLER_SETTINGS.value)
         if not isinstance(overrides, dict):
             overrides = {}
+        profile = memcache.get(constants.ACTIVE_PROFILE.value) or ''
+    if not profile and config.has_section('profiles'):
+        profile = config['profiles'].get('active', '')
+    history = config['history'] if config.has_section('history') else EMPTY_SECTION
     configured = config['trickler'] if config.has_section('trickler') else {}
-    section = collections.ChainMap(overrides, configured, helpers.DEFAULT_TRICKLER_SETTINGS)
+    # Live overrides win, then the selected powder's profile, then the plain [trickler]
+    # section, then the built-in defaults.
+    section = collections.ChainMap(
+        overrides,
+        helpers.profile_settings(config, profile),
+        configured,
+        helpers.DEFAULT_TRICKLER_SETTINGS)
     factor = decimal.Decimal('1')
     if target_unit == scale.Units.GRAMS:
         factor = decimal.Decimal('1') / GRAINS_PER_GRAM
@@ -264,7 +339,10 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
         settle_timeout=float(section['settle_timeout']),
         cutoff_weight=decimal.Decimal(section['cutoff_weight']) * factor,
         rate_window=int(section['rate_window']),
-        lookahead_time=decimal.Decimal(section['lookahead_time']))
+        lookahead_time=decimal.Decimal(section['lookahead_time']),
+        profile=profile,
+        history_path=history.get('path', '') if history.getboolean('enabled', True) else '',
+        history_max_rows=history.getint('max_rows', 500))
 
 
 def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
@@ -274,6 +352,10 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
     doesn't reach the scale for a couple of tenths of a second, by which point the
     charge has moved past where it was aimed. Pulsing removes the guesswork -- nothing
     is fed until the last thing fed has been weighed.
+
+    Returns the outcome: 'complete' if the charge reached target, otherwise why it
+    stopped. The caller records it, so an abandoned charge is visible in the history
+    rather than silently absent.
     """
     logging.info('Starting final approach. Learned rate: %r', feeder.rate)
     weight = feeder.settled_weight(feeder.settings.settle_min_time)
@@ -284,36 +366,36 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
             logging.warning(
                 'Final approach ran for %ss without finishing, stopping. remainder: %s %s',
                 MAX_PULSE_PHASE_SECONDS, target_weight - weight, target_unit)
-            return
+            return 'timeout'
 
         # Stop running if auto mode is disabled.
         if not memcache.get(constants.AUTO_MODE.value):
             logging.debug('auto mode disabled.')
-            return
+            return 'aborted'
 
         # Stop running if scale's unit no longer matches target unit.
         if scale.unit != target_unit:
             logging.debug('Target unit does not match scale unit.')
-            return
+            return 'aborted'
 
         # Stop running if pan removed.
         if weight < 0:
             logging.debug('Pan removed.')
-            return
+            return 'aborted'
 
         remainder = target_weight - weight
         if feeder.done(remainder):
             logging.info(
                 'Charge complete. scale: %s %s remainder: %s (smallest pulse %s)',
                 weight, scale.unit, remainder, feeder.min_dose)
-            return
+            return 'complete'
 
         if feeder.empty_pulses >= MAX_EMPTY_PULSES:
             logging.warning(
                 '%s pulses in a row delivered nothing, stopping. Check the hopper and '
                 'tube. remainder: %s %s',
                 feeder.empty_pulses, remainder, target_unit)
-            return
+            return 'empty'
 
         on_time, dose = feeder.feed(remainder)
         weight = scale.weight
@@ -329,6 +411,8 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
     feed_rate = FeedRateEstimator(settings.rate_window)
     feeder = PulseFeeder(trickler_motor1, scale, settings, memcache, constants)
     stale_since = None
+    started = time.time()
+    outcome = None
     pidtune_logger.info('timestamp, input (motor %), output (weight %)')
     logging.info('Starting trickling process...')
 
@@ -397,6 +481,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
                 trickler_motor1.off()
                 trickler_motor2.off()
                 logging.debug('Trickling complete, motors turned off and PID reset.')
+                outcome = 'complete'
                 break
 
             # Close enough to hand over to the pulse feeder, which finishes the charge
@@ -404,7 +489,8 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
             if projected_remainder <= settings.pulse_trickle_weight:
                 trickler_motor1.off()
                 trickler_motor2.off()
-                pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit)
+                outcome = pulse_phase(
+                    memcache, constants, feeder, scale, target_weight, target_unit)
                 break
 
             # Enough powder is already on its way to finish the charge, even though the
@@ -442,6 +528,12 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
         trickler_motor2.off()
         # Clear PID values.
         pid.clear()
+        # Record here rather than at each exit, so a charge that was abandoned -- auto
+        # mode switched off, pan lifted, a fault -- is visible in the history instead of
+        # silently missing. `outcome` is only set where the charge actually finished.
+        record_charge(settings, target_weight, scale.weight, target_unit,
+                      outcome or 'aborted', feeder.pulses, time.time() - started,
+                      feeder.rate)
     logging.info('Trickling process stopped.')
 
 

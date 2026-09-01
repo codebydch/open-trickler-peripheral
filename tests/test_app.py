@@ -135,3 +135,94 @@ class StatusTest(AppTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HistoryPageTest(AppTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.directory = tempfile.mkdtemp()
+        self.path = os.path.join(self.directory, 'charges.csv')
+        helpers.update_ini_section(self.ini, 'history',
+                                   {'enabled': 'True', 'path': self.path})
+        app.config.read(self.ini)
+
+    def tearDown(self):
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def record(self, error, outcome='complete', profile=''):
+        helpers.append_charge(self.path, {
+            'timestamp': '2026-09-01T10:00:00', 'profile': profile, 'outcome': outcome,
+            'target': '45.00', 'final': '45.01', 'error': str(error), 'unit': 'GRAINS',
+            'pulses': '6', 'seconds': '7.2', 'learned_rate': '0.28'})
+
+    def test_empty_history_says_so_rather_than_failing(self):
+        page = self.client.get('/app/history')
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('No completed charges', page.get_data(as_text=True))
+
+    def test_shows_the_statistics(self):
+        for error in (-0.01, 0.00, 0.01, 0.30):
+            self.record(error)
+        body = self.client.get('/app/history').get_data(as_text=True)
+        # Three of four inside the default 0.02 tolerance.
+        self.assertIn('75%', body)
+
+    def test_filters_by_profile(self):
+        self.record(0.01, profile='Varget')
+        self.record(0.40, profile='H4350')
+        body = self.client.get('/app/history?profile=Varget').get_data(as_text=True)
+        self.assertIn('+0.010', body)
+        self.assertNotIn('+0.400', body)
+
+    def test_json_endpoint(self):
+        self.record(0.01)
+        payload = json.loads(self.client.get('/app/history.json').get_data(as_text=True))
+        self.assertEqual(len(payload['rows']), 1)
+        self.assertEqual(payload['stats']['count'], 1)
+
+
+class ProfilePageTest(AppTestCase):
+
+    def test_selecting_a_profile_sets_it_live_and_persists_it(self):
+        helpers.update_ini_section(self.ini, 'profile:Varget', {'pulse_rate': '0.42'})
+        app.config.read(self.ini)
+        self.client.post('/app/profile', data={'profile': 'Varget', 'select': '1'})
+
+        self.assertEqual(self.memcache['active_profile'], 'Varget')
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(self.ini)
+        self.assertEqual(config['profiles']['active'], 'Varget')
+
+    def test_saving_captures_the_settings_and_the_learned_rate(self):
+        self.memcache['trickler_pulse_rate'] = 0.375
+        self.client.post('/app/profile', data={'profile': 'Varget', 'save': '1'})
+
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(self.ini)
+        self.assertIn('profile:Varget', config.sections())
+        self.assertEqual(float(config['profile:Varget']['pulse_rate']), 0.375)
+        self.assertEqual(self.memcache['active_profile'], 'Varget')
+
+    def test_saving_without_a_name_is_refused(self):
+        body = self.client.post('/app/profile', data={'save': '1'}).get_data(as_text=True)
+        self.assertIn('Give the profile a name', body)
+
+    def test_clearing_the_learned_rate_clears_the_active_profile_one(self):
+        self.memcache['active_profile'] = 'Varget'
+        self.memcache['trickler_pulse_rate:Varget'] = 0.44
+        self.memcache['trickler_pulse_rate'] = 0.11
+        self.client.post('/app/config/update', data={'reset_learned': '1'})
+        self.assertNotIn('trickler_pulse_rate:Varget', self.memcache)
+        self.assertIn('trickler_pulse_rate', self.memcache,
+                      'the unscoped rate belongs to a different profile')
+
+    def test_status_reports_the_profile_scoped_rate(self):
+        self.memcache['active_profile'] = 'Varget'
+        self.memcache['trickler_pulse_rate:Varget'] = 0.44
+        self.memcache['trickler_pulse_rate'] = 0.11
+        status = json.loads(self.client.get('/app/status').get_data(as_text=True))
+        self.assertEqual(status['pulse_rate'], 0.44)
+        self.assertEqual(status['profile'], 'Varget')
