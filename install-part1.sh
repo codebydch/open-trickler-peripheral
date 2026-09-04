@@ -28,6 +28,13 @@ readonly APT_PACKAGES=(
   fonts-dejavu
   python3-pil
   python3-numpy
+  # Load-bearing despite nothing here importing them: raspi-blinka.py (below) pip-installs
+  # rpi_ws281x and RPi.GPIO, which are C extensions with no Pi wheels. pip compiles them
+  # from source, and that needs the CPython headers. python3-venv is the same problem one
+  # step earlier -- `python3 -m venv` is a separate package and a Lite image lacks it.
+  python3-dev
+  python3-pip
+  python3-venv
 )
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -98,6 +105,12 @@ install_blinka() {
     skip "Blinka is already working in the virtual environment."
     return
   fi
+  # Check before pip does, so a missing toolchain reads as one line rather than a hundred
+  # lines of build output from rpi_ws281x.
+  command -v cc >/dev/null 2>&1 ||
+    die "No C compiler found. The Adafruit installer builds C extensions: sudo apt-get install build-essential python3-dev"
+  python3-config --includes >/dev/null 2>&1 ||
+    die "No CPython headers found. The Adafruit installer builds C extensions: sudo apt-get install python3-dev"
   # raspi-blinka.py imports adafruit_shell, so its own dependency has to go in first.
   info "Installing adafruit-python-shell, which the Adafruit installer needs."
   "${VENV_DIR}/bin/pip" install --upgrade adafruit-python-shell
