@@ -73,6 +73,31 @@ safe to re-run, and part 2 checks that part 1 has been done before it starts.
 [`setup.txt`](setup.txt) documents the same steps by hand, if you would rather do it
 yourself or want to see what the scripts are doing.
 
+### Swap, on a Pi with little RAM
+
+**Set this up before running part 1 if your Pi has 512 MB of RAM or less** (a Pi Zero, Pi
+Zero 2, or an older Model A). The `apt full-upgrade` in part 1 is memory-hungry enough to
+crash such a board outright. The install scripts deliberately leave swap alone rather than
+reconfiguring it behind your back.
+
+[Pi My Life Up's swap file guide](https://pimylifeup.com/raspberry-pi-swap-file/) walks
+through it. Which mechanism you have depends on the OS version:
+
+- **Bookworm and earlier** use `dphys-swapfile`. Set `CONF_SWAPSIZE=2048` in
+  `/etc/dphys-swapfile`, then `sudo dphys-swapfile setup && sudo dphys-swapfile swapon`.
+- **Trixie and later** use [`rpi-swap`](https://github.com/raspberrypi/rpi-swap), which is
+  configured in `/etc/rpi/swap.conf` (or a drop-in under `/etc/rpi/swap.conf.d/`) and
+  documented in `man swap.conf`.
+
+Two things catch people out on Trixie. The default `Mechanism=auto` resolves to
+`zram+file`, where the swap is compressed RAM and `/var/swap` is only a *writeback target*
+— so a 2 GB `/var/swap` is not 2 GB of usable swap. And `[File] RamMultiplier=1` sizes the
+file from your RAM, so `MaxSizeMiB=2048` is only a ceiling: a 512 MB Pi gets 512 MB. For a
+plain disk-backed swap file like the old behaviour, set `Mechanism=swapfile` under
+`[Main]` and `FixedSizeMiB=2048` under `[File]`.
+
+Check what you actually ended up with using `swapon --show` and `free -h`.
+
 ## Configuration
 
 `opentrickler_config.ini` is the single source of truth, and every value is commented in
