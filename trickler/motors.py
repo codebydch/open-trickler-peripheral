@@ -102,16 +102,11 @@ class ServoMotor:
         self.min_pulse_width = float(kwargs.get('min_pulse_width', config['servo']['min_pulse_width']))
         self.max_pulse_width = float(kwargs.get('max_pulse_width', config['servo']['max_pulse_width']))
 
-        # AngularServo maps angle to pulse width linearly between the two bounds, which
-        # is exactly the calculation this class used to do by hand. Note the config is in
-        # microseconds and gpiozero wants seconds.
-        self.servo = gpiozero.AngularServo(
-            self.servo_pin,
-            initial_angle=None,
-            min_angle=0,
-            max_angle=self.max_angle,
-            min_pulse_width=self.min_pulse_width / 1e6,
-            max_pulse_width=self.max_pulse_width / 1e6)
+        # The pin is claimed only while the servo is actually moving, and released again
+        # by off(). pigpiod used to let the trickler and the servo setup page drive the
+        # same pin from separate processes; without a daemon, whichever holds the pin
+        # locks the other out, so hold it for as little time as possible.
+        self.servo = None
         logging.debug(
             'Created servo motor on PIN %r with angles %r and %r',
             self.servo_pin,
@@ -125,30 +120,50 @@ class ServoMotor:
         self.off()
         self.stop()
 
+    def _open(self):
+        """Returns the servo, claiming the GPIO pin if it is not already held.
+
+        AngularServo maps angle to pulse width linearly between the two bounds, which is
+        exactly the calculation this class used to do by hand against pigpio. Note the
+        config is in microseconds and gpiozero wants seconds.
+        """
+        if self.servo is None or self.servo.closed:
+            self.servo = gpiozero.AngularServo(
+                self.servo_pin,
+                # Don't move on open: claiming the pin should not twitch the measure.
+                initial_angle=None,
+                min_angle=0,
+                max_angle=self.max_angle,
+                min_pulse_width=self.min_pulse_width / 1e6,
+                max_pulse_width=self.max_pulse_width / 1e6)
+        return self.servo
+
     def set_initial_angle(self):
         """Sets servo initial angle."""
-        self.servo.angle = self.initial_angle
+        self._open().angle = self.initial_angle
 
     def run_servo(self):
         """Moves servo to wanted angle."""
-        self.servo.angle = self.servo_angle
+        self._open().angle = self.servo_angle
 
     def off(self):
-        """Stops driving the servo, leaving it unpowered.
+        """Stops driving the servo and releases the GPIO pin.
 
-        Worth doing whenever the servo has finished moving: an idle servo held on a
-        software-timed PWM signal can buzz and hunt around its setpoint, which wastes
-        power and heats the motor for no benefit. The powder measure holds its own
-        position mechanically.
+        Two reasons to do this as soon as the servo has finished moving. An idle servo
+        held on a software-timed PWM signal buzzes and hunts around its setpoint, which
+        wastes power and heats the motor; the powder measure holds its own position
+        mechanically. And the pin is a shared resource -- the servo setup page runs in a
+        different process and cannot open GPIO pins this one is still holding.
+
+        Safe to call when the servo was never opened, or has already been released.
         """
-        # The atexit handler calls this after stop() has already released the pin, and
-        # detaching a closed device raises. Nothing to turn off in that case anyway.
-        if not self.servo.closed:
+        if self.servo is not None and not self.servo.closed:
             self.servo.detach()
+            self.servo.close()
 
     def stop(self):
         """Releases the GPIO pin. Safe to call more than once."""
-        self.servo.close()
+        self.off()
 
 
 # Handle command-line execution.

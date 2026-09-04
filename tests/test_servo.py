@@ -44,6 +44,7 @@ class PulseWidthTest(ServoTestCase):
     def test_matches_the_pigpio_formula_across_the_range(self):
         config = fakes.load_config()
         servo = motors.ServoMotor(config)
+        servo.run_servo()  # claims the pin
         max_angle = float(config['servo']['max_angle'])
         min_pulse = float(config['servo']['min_pulse_width'])
         max_pulse = float(config['servo']['max_pulse_width'])
@@ -60,6 +61,7 @@ class PulseWidthTest(ServoTestCase):
         """The config is in microseconds; gpiozero wants seconds. Getting this wrong by
         a factor of a million would drive the servo hard into its end stop."""
         servo = motors.ServoMotor(fakes.load_config())
+        servo.run_servo()
         try:
             self.assertAlmostEqual(servo.servo.min_pulse_width, 0.0005)
             self.assertAlmostEqual(servo.servo.max_pulse_width, 0.0025)
@@ -75,9 +77,13 @@ class MovementTest(ServoTestCase):
         self.servo = motors.ServoMotor(self.config)
         self.addCleanup(self.servo.stop)
 
-    def test_starts_detached(self):
-        """Constructing the object must not twitch the measure."""
-        self.assertIsNone(self.servo.servo.angle)
+    def test_construction_does_not_claim_the_pin(self):
+        """Constructing the object must neither twitch the measure nor lock the servo
+        setup page out of the pin."""
+        self.assertIsNone(self.servo.servo)
+
+    def test_opening_does_not_twitch_the_measure(self):
+        self.assertIsNone(self.servo._open().angle)
 
     def test_run_servo_goes_to_the_dump_angle(self):
         self.servo.run_servo()
@@ -90,17 +96,34 @@ class MovementTest(ServoTestCase):
         self.assertAlmostEqual(self.servo.servo.angle,
                                float(self.config['servo']['initial_angle']))
 
-    def test_off_releases_the_servo(self):
-        """Detached rather than held: an idle servo on software-timed PWM buzzes and
-        hunts, and the measure holds its own position."""
+    def test_off_releases_the_pin(self):
+        """Detached and released, not just detached: an idle servo on software-timed PWM
+        buzzes and hunts, and while this process holds the pin the servo setup page --
+        a separate process -- cannot open it. pigpiod used to let both share it."""
         self.servo.run_servo()
         self.assertIsNotNone(self.servo.servo.angle)
         self.servo.off()
-        self.assertIsNone(self.servo.servo.angle)
+        self.assertTrue(self.servo.servo.closed)
+
+    def test_another_process_can_claim_the_pin_once_off(self):
+        self.servo.run_servo()
+        self.servo.off()
+        # Stands in for servo_app.py opening the same pin.
+        other = gpiozero.AngularServo(
+            int(self.config['servo']['servo_pin']), initial_angle=None,
+            min_angle=0, max_angle=180,
+            min_pulse_width=0.0005, max_pulse_width=0.0025)
+        other.close()
+
+    def test_the_pin_is_reclaimed_after_being_released(self):
+        """A charge after an off() has to work."""
+        self.servo.run_servo()
+        self.servo.off()
+        self.servo.run_servo()
+        self.assertAlmostEqual(self.servo.servo.angle,
+                               float(self.config['servo']['servo_angle']))
 
     def test_overridable_from_kwargs(self):
-        # Release the pin first: gpiozero reserves it, so two servos on GPIO17 collide.
-        self.servo.stop()
         servo = motors.ServoMotor(self.config, servo_angle=120, initial_angle=10)
         self.addCleanup(servo.stop)
         servo.run_servo()
@@ -114,8 +137,12 @@ class ShutdownTest(ServoTestCase):
 
     def test_off_after_stop_does_not_raise(self):
         servo = motors.ServoMotor(fakes.load_config())
+        servo.run_servo()
         servo.stop()
         servo.off()
+
+    def test_off_without_ever_moving_does_not_raise(self):
+        motors.ServoMotor(fakes.load_config()).off()
 
     def test_the_graceful_exit_handler_is_safe_to_repeat(self):
         """It is registered with atexit, and also runs if something else closes the

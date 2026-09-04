@@ -194,12 +194,19 @@ not packaged at all from Raspberry Pi OS Trixie onwards, so the servo now uses g
 same linear interpolation between `min_pulse_width` and `max_pulse_width` that the old
 code did by hand.
 
-One behavioural difference: the servo is now released once it has finished moving, rather
-than being held at its initial angle between charges. Software-timed PWM makes an idle
-servo buzz and hunt around its setpoint, which wastes power and heats the motor; the
-powder measure holds its own position mechanically. If yours relies on the servo actively
-holding the lever, remove the `servo_motor.off()` call after the powder dump in
-`trickler/main.py`.
+One behavioural difference: the servo is released once it has finished moving, rather
+than being held at its initial angle between charges. Two reasons. Software-timed PWM
+makes an idle servo buzz and hunt around its setpoint, which wastes power and heats the
+motor, and the measure holds its own position mechanically anyway. More importantly, a
+GPIO pin can only be held by one process at a time now — `pigpiod` used to let the
+trickler and the servo setup page share it, and without a daemon they cannot. The trickler
+therefore claims the servo pin only while it is actually dumping powder.
+
+That means the servo page at `/servo/` works whenever the trickler is idle, and reports
+that the pin is busy if you try to use it mid-charge. If your measure relies on the servo
+actively holding the lever, remove the `servo_motor.off()` call after the powder dump in
+`trickler/main.py` — but be aware that leaving it holding the pin locks the servo page
+out.
 
 ## References
 

@@ -69,7 +69,7 @@ def move_servo(gpio_pin, angle, min_pulse, max_pulse):
 @app.route('/servo/')
 def index():
     # Default values for the form
-    return render_template('servo.html', gpio_pin='', angle='', min_pulse='', max_pulse='')
+    return render_template('servo.html', gpio_pin='', angle='', min_pulse='', max_pulse='', error=None)
 
 @app.route('/servo/move', methods=['POST'])
 def move():
@@ -80,10 +80,23 @@ def move():
     max_pulse = request.form['max_pulse']
 
     # Move the servo
-    move_servo(int(gpio_pin), float(angle), int(min_pulse), int(max_pulse))
+    error = None
+    try:
+        move_servo(int(gpio_pin), float(angle), int(min_pulse), int(max_pulse))
+    except gpiozero.GPIOPinInUse:
+        # The trickler holds the servo pin while it is dumping powder. Since pigpiod
+        # went away there is no daemon to share a pin through, so say what is happening
+        # rather than returning a 500.
+        error = ('GPIO %s is busy. The trickler holds the servo pin while it dumps '
+                 'powder -- wait for the charge to finish, or turn auto mode off, and '
+                 'try again.' % gpio_pin)
+        logging.warning(error)
+    except gpiozero.GPIOZeroError as exc:
+        error = 'Could not move the servo on GPIO %s: %s' % (gpio_pin, exc)
+        logging.warning(error)
 
     # Pass the form data back to the template to retain the values
-    return render_template('servo.html', gpio_pin=gpio_pin, angle=angle, min_pulse=min_pulse, max_pulse=max_pulse)
+    return render_template('servo.html', gpio_pin=gpio_pin, angle=angle, min_pulse=min_pulse, max_pulse=max_pulse, error=error)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=False)
