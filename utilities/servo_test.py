@@ -1,12 +1,11 @@
-from gpiozero.pins.pigpio import PiGPIOFactory
 from gpiozero import AngularServo
 from time import sleep
 
 
-my_factory = PiGPIOFactory()
-
+# No explicit pin factory: gpiozero picks one, preferring lgpio. pigpio is archived and
+# is not available from Raspberry Pi OS Trixie onwards.
 # Use BCM numbering, not BOARD
-servo = AngularServo(17, initial_angle=0, min_angle=0, max_angle=180, min_pulse_width=0.0005, max_pulse_width=0.0025, frame_width=0.02, pin_factory=my_factory)  # Use GPIO 17 (BCM numbering) for pin 11
+servo = AngularServo(17, initial_angle=0, min_angle=0, max_angle=180, min_pulse_width=0.0005, max_pulse_width=0.0025, frame_width=0.02)  # Use GPIO 17 (BCM numbering) for pin 11
 
 min_pulse_width = servo.min_pulse_width
 

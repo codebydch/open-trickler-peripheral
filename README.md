@@ -113,7 +113,7 @@ place. The sections worth knowing:
 - `[history]` — where charges are recorded (`/var/lib/opentrickler/charges.csv` by
   default, outside the repo so a `git pull` can't disturb it) and how many rows to keep.
 - `[profiles]` — the powder profile in use; each is a `[profile:Name]` section.
-- `[servo]` — powder measure travel and pulse widths.
+- `[servo]` — powder measure travel and pulse widths, in **microseconds**.
 - `[PID]` — gains for the continuous phases only. The pulse feeder does not use the PID.
 
 **Tuning for accuracy:** `pulse_trickle_weight` must be comfortably larger than what a
@@ -179,6 +179,27 @@ charge actually lands on target. `tests/fakes.py` holds the simulated hardware.
 `utilities/` holds standalone hardware tests for the servo, the display, and logging.
 `trickler/motors.py` and `trickler/scales.py` can each be run directly against a config
 file to exercise the hardware on its own.
+
+## A note on GPIO libraries
+
+Both the trickler motors and the powder-measure servo go through
+[gpiozero](https://gpiozero.readthedocs.io/), which selects its own pin factory and
+prefers `lgpio`. Nothing here talks to a GPIO library directly, and there is no GPIO
+daemon to install or keep running.
+
+This used to use [pigpio](https://github.com/joan2937/pigpio) for the servo. Its author
+has archived it in favour of [lg / rgpiod](https://abyz.me.uk/lg/rgpiod.html), and it is
+not packaged at all from Raspberry Pi OS Trixie onwards, so the servo now uses gpiozero's
+`AngularServo`. The angle-to-pulse-width mapping is unchanged — `AngularServo` does the
+same linear interpolation between `min_pulse_width` and `max_pulse_width` that the old
+code did by hand.
+
+One behavioural difference: the servo is now released once it has finished moving, rather
+than being held at its initial angle between charges. Software-timed PWM makes an idle
+servo buzz and hunt around its setpoint, which wastes power and heats the motor; the
+powder measure holds its own position mechanically. If yours relies on the servo actively
+holding the lever, remove the `servo_motor.off()` call after the powder dump in
+`trickler/main.py`.
 
 ## References
 

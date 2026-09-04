@@ -8,7 +8,8 @@ import argparse
 import helpers
 import configparser
 import os
-import pigpio
+import time
+import gpiozero
 import logging
 from flask import Flask, render_template, request, redirect, url_for
 
@@ -40,15 +41,30 @@ helpers.setup_logging(LOG_LEVEL)
     
 logging.info('Starting OpenTrickler Flask Servo App daemon...')
 
-# Initialize pigpio and Flask
-pi = pigpio.pi()
 app = Flask(__name__)
 
 def move_servo(gpio_pin, angle, min_pulse, max_pulse):
-    """Move the servo to the specified angle."""
-    pulse_width = min_pulse + (angle / 180.0) * (max_pulse - min_pulse)
-    pi.set_servo_pulsewidth(gpio_pin, pulse_width)
-    logging.debug(f"Servo moved to angle {angle} (Pulse width: {pulse_width} μs) on GPIO {gpio_pin}")
+    """Move the servo to the specified angle, then stop driving it.
+
+    This page is for setting a powder measure up, so each request is a one-off move on
+    whatever pin was typed into the form. Build the servo, move it, and release the pin
+    again rather than holding it -- otherwise a second request with a different pin would
+    find the first one still claimed.
+
+    gpiozero's AngularServo takes pulse widths in seconds; the form is in microseconds.
+    """
+    with gpiozero.AngularServo(
+            gpio_pin,
+            initial_angle=None,
+            min_angle=0,
+            max_angle=180,
+            min_pulse_width=min_pulse / 1e6,
+            max_pulse_width=max_pulse / 1e6) as servo:
+        servo.angle = angle
+        # Give it time to travel before the pin is released.
+        time.sleep(1)
+        servo.detach()
+    logging.debug(f"Servo moved to angle {angle} on GPIO {gpio_pin}")
 
 @app.route('/servo/')
 def index():

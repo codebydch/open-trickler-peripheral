@@ -632,6 +632,10 @@ def main(config, memcache, args, pidtune_logger):
                     servo_motor.set_initial_angle()
                     # Required since the larger powder drop hitting the cup may overshoot the weight until settling
                     time.sleep(1)
+                    # Long enough for the servo to have got back to its initial angle, so
+                    # stop driving it. Holding a software-timed PWM signal on an idle
+                    # servo makes it buzz and hunt; the measure holds position itself.
+                    servo_motor.off()
                     logging.info('Completed powder dump.')
                 # Run trickler loop.
                 trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)
