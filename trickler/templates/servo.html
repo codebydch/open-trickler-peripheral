@@ -49,11 +49,23 @@
       button:hover {
         background-color: #0056b3;
       }
+      .error {
+        background-color: #f8d7da;
+        color: #842029;
+        border-radius: 4px;
+        padding: 10px;
+        font-size: 15px;
+        text-align: left;
+      }
     </style>
   </head>
   <body>
     <div class="container">
       <h1>Servo Control</h1>
+      {% if error %}
+        <p class="error">{{ error }}</p>
+      {% endif %}
+
       <form method="post" action="/servo/move">
         <div>
           <label for="gpio_pin">GPIO Pin:</label>

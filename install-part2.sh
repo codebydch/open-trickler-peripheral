@@ -110,12 +110,6 @@ create_history_dir() {
   fi
 }
 
-enable_pigpiod() {
-  step "Enabling pigpiod (drives the servo)"
-  sudo systemctl enable pigpiod
-  sudo systemctl start pigpiod
-}
-
 install_services() {
   step "Installing the systemd services"
   sudo install -m 0644 "${REPO_DIR}"/system/*.service /etc/systemd/system/
@@ -164,7 +158,6 @@ main() {
   configure_nginx
   publish_web_pages
   create_history_dir
-  enable_pigpiod
   install_services
   report
 }

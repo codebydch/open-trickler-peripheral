@@ -8,7 +8,8 @@ import argparse
 import helpers
 import configparser
 import os
-import pigpio
+import time
+import gpiozero
 import logging
 from flask import Flask, render_template, request, redirect, url_for
 
@@ -40,20 +41,35 @@ helpers.setup_logging(LOG_LEVEL)
     
 logging.info('Starting OpenTrickler Flask Servo App daemon...')
 
-# Initialize pigpio and Flask
-pi = pigpio.pi()
 app = Flask(__name__)
 
 def move_servo(gpio_pin, angle, min_pulse, max_pulse):
-    """Move the servo to the specified angle."""
-    pulse_width = min_pulse + (angle / 180.0) * (max_pulse - min_pulse)
-    pi.set_servo_pulsewidth(gpio_pin, pulse_width)
-    logging.debug(f"Servo moved to angle {angle} (Pulse width: {pulse_width} μs) on GPIO {gpio_pin}")
+    """Move the servo to the specified angle, then stop driving it.
+
+    This page is for setting a powder measure up, so each request is a one-off move on
+    whatever pin was typed into the form. Build the servo, move it, and release the pin
+    again rather than holding it -- otherwise a second request with a different pin would
+    find the first one still claimed.
+
+    gpiozero's AngularServo takes pulse widths in seconds; the form is in microseconds.
+    """
+    with gpiozero.AngularServo(
+            gpio_pin,
+            initial_angle=None,
+            min_angle=0,
+            max_angle=180,
+            min_pulse_width=min_pulse / 1e6,
+            max_pulse_width=max_pulse / 1e6) as servo:
+        servo.angle = angle
+        # Give it time to travel before the pin is released.
+        time.sleep(1)
+        servo.detach()
+    logging.debug(f"Servo moved to angle {angle} on GPIO {gpio_pin}")
 
 @app.route('/servo/')
 def index():
     # Default values for the form
-    return render_template('servo.html', gpio_pin='', angle='', min_pulse='', max_pulse='')
+    return render_template('servo.html', gpio_pin='', angle='', min_pulse='', max_pulse='', error=None)
 
 @app.route('/servo/move', methods=['POST'])
 def move():
@@ -64,10 +80,23 @@ def move():
     max_pulse = request.form['max_pulse']
 
     # Move the servo
-    move_servo(int(gpio_pin), float(angle), int(min_pulse), int(max_pulse))
+    error = None
+    try:
+        move_servo(int(gpio_pin), float(angle), int(min_pulse), int(max_pulse))
+    except gpiozero.GPIOPinInUse:
+        # The trickler holds the servo pin while it is dumping powder. Since pigpiod
+        # went away there is no daemon to share a pin through, so say what is happening
+        # rather than returning a 500.
+        error = ('GPIO %s is busy. The trickler holds the servo pin while it dumps '
+                 'powder -- wait for the charge to finish, or turn auto mode off, and '
+                 'try again.' % gpio_pin)
+        logging.warning(error)
+    except gpiozero.GPIOZeroError as exc:
+        error = 'Could not move the servo on GPIO %s: %s' % (gpio_pin, exc)
+        logging.warning(error)
 
     # Pass the form data back to the template to retain the values
-    return render_template('servo.html', gpio_pin=gpio_pin, angle=angle, min_pulse=min_pulse, max_pulse=max_pulse)
+    return render_template('servo.html', gpio_pin=gpio_pin, angle=angle, min_pulse=min_pulse, max_pulse=max_pulse, error=error)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=False)

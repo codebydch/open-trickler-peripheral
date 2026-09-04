@@ -72,12 +72,9 @@ unzip -d websocketd websocketd-0.4.1-linux_arm.zip
 cd websocketd
 sudo cp websocketd /usr/sbin
 
-# pigpio install
-cd /code
-sudo apt-get install pigpio
-sudo systemctl enable pigpiod
-sudo systemctl daemon-reload
-pip install pigpio
+# No GPIO daemon is needed. The trickler motors and the servo both go through gpiozero,
+# which picks its own pin factory (it prefers lgpio). pigpio, which this used to need,
+# has been archived by its author and is not available from Trixie onwards.
 
 # Charge history directory (the trickler creates it, but do it here so ownership is sane)
 sudo mkdir -p /var/lib/opentrickler

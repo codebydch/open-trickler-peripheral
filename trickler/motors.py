@@ -15,7 +15,6 @@ import enum
 import logging
 
 import gpiozero
-import pigpio
 
 class TricklerMotor:
     """Controls a small vibration DC motor with the PWM controller on the Pi."""
@@ -81,7 +80,13 @@ class TricklerMotor:
         return self.pwm.value
 
 class ServoMotor:
-    """Controls a server motor for a Powder Measure with the PWM controller on the Pi."""
+    """Controls a servo motor for a Powder Measure with the PWM controller on the Pi.
+
+    Uses gpiozero rather than a GPIO library directly. gpiozero picks its own pin
+    factory -- it prefers lgpio -- so this keeps working across the backend changes
+    Raspberry Pi OS has been through. pigpio, which this used to use, is archived and is
+    not available at all from Trixie onwards.
+    """
 
     def __init__(self, config, **kwargs):
         """Constructor."""
@@ -97,9 +102,11 @@ class ServoMotor:
         self.min_pulse_width = float(kwargs.get('min_pulse_width', config['servo']['min_pulse_width']))
         self.max_pulse_width = float(kwargs.get('max_pulse_width', config['servo']['max_pulse_width']))
 
-        # Initialize pigpio and Flask
-        self.servo = pigpio.pi()
-        #self.set_initial_angle()
+        # The pin is claimed only while the servo is actually moving, and released again
+        # by off(). pigpiod used to let the trickler and the servo setup page drive the
+        # same pin from separate processes; without a daemon, whichever holds the pin
+        # locks the other out, so hold it for as little time as possible.
+        self.servo = None
         logging.debug(
             'Created servo motor on PIN %r with angles %r and %r',
             self.servo_pin,
@@ -108,28 +115,56 @@ class ServoMotor:
         atexit.register(self._graceful_exit)
 
     def _graceful_exit(self):
-        """Graceful exit function, turn off servo, and release PIGPIO."""
+        """Graceful exit function, turn off servo, and release the pin."""
         logging.debug('Closing servo motor...')
         self.off()
         self.stop()
 
+    def _open(self):
+        """Returns the servo, claiming the GPIO pin if it is not already held.
+
+        AngularServo maps angle to pulse width linearly between the two bounds, which is
+        exactly the calculation this class used to do by hand against pigpio. Note the
+        config is in microseconds and gpiozero wants seconds.
+        """
+        if self.servo is None or self.servo.closed:
+            self.servo = gpiozero.AngularServo(
+                self.servo_pin,
+                # Don't move on open: claiming the pin should not twitch the measure.
+                initial_angle=None,
+                min_angle=0,
+                max_angle=self.max_angle,
+                min_pulse_width=self.min_pulse_width / 1e6,
+                max_pulse_width=self.max_pulse_width / 1e6)
+        return self.servo
+
     def set_initial_angle(self):
         """Sets servo initial angle."""
-        pulse_width = self.min_pulse_width + (self.initial_angle / self.max_angle) * (self.max_pulse_width - self.min_pulse_width)
-        self.servo.set_servo_pulsewidth(self.servo_pin, pulse_width)
+        self._open().angle = self.initial_angle
 
     def run_servo(self):
         """Moves servo to wanted angle."""
-        pulse_width = self.min_pulse_width + (self.servo_angle / self.max_angle) * (self.max_pulse_width - self.min_pulse_width)
-        self.servo.set_servo_pulsewidth(self.servo_pin, pulse_width)
-            
+        self._open().angle = self.servo_angle
+
     def off(self):
-        """Turns servo off."""
-        self.servo.set_servo_pulsewidth(self.servo_pin, 0)
+        """Stops driving the servo and releases the GPIO pin.
+
+        Two reasons to do this as soon as the servo has finished moving. An idle servo
+        held on a software-timed PWM signal buzzes and hunts around its setpoint, which
+        wastes power and heats the motor; the powder measure holds its own position
+        mechanically. And the pin is a shared resource -- the servo setup page runs in a
+        different process and cannot open GPIO pins this one is still holding.
+
+        Safe to call when the servo was never opened, or has already been released.
+        """
+        if self.servo is not None and not self.servo.closed:
+            self.servo.detach()
+            self.servo.close()
 
     def stop(self):
-        """Releases pigpio resources."""
-        self.servo.stop()
+        """Releases the GPIO pin. Safe to call more than once."""
+        self.off()
+
 
 # Handle command-line execution.
 if __name__ == '__main__':

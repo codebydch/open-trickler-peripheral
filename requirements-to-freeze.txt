@@ -1,7 +1,8 @@
 # Trickler daemon and web apps.
 pyserial
+# gpiozero drives both the trickler motors and the servo. It picks its own pin factory,
+# preferring lgpio; pigpio is archived and gone from Raspberry Pi OS Trixie onwards.
 gpiozero
-pigpio
 pymemcache
 flask
 
