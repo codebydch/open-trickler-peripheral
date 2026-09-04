@@ -8,11 +8,13 @@
 #     one at a time, so there is one list to keep correct.
 #   - websocketd is chosen to match the CPU (see below).
 #   - the nginx sites-enabled symlink is ensured rather than assumed.
+#   - swap is not touched at all; it is left to you, per the README.
 
-# Raspberry Pi Zeros have a small default swap size which causes your device to crash when updating
-# Edit the file /etc/dphys-swapfile and change CONF_SWAPSIZE to 2048
-# Reboot and then before doing anything enter the command "swapon"
-# Continue installing updates
+# Swap, on a Pi with little RAM (a Pi Zero, Pi Zero 2, older Model A).
+# The upgrade below can crash such a board outright. Set swap up first -- see the "Swap"
+# section of README.md. Bookworm and earlier use dphys-swapfile; Trixie and later use
+# rpi-swap (/etc/rpi/swap.conf, `man swap.conf`), where the defaults do not mean what
+# they look like. The install scripts deliberately leave swap alone.
 sudo apt update && sudo apt upgrade
 
 # Create code folder at root

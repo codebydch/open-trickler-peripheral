@@ -6,6 +6,11 @@
 # reboot, then run install-part2.sh.
 #
 # Safe to re-run: every step checks whether it has already been done.
+#
+# This deliberately does not touch swap. How Raspberry Pi OS manages it changed with
+# Trixie, and getting it wrong silently is worse than leaving it alone. If you are on a
+# Pi with little RAM, see the swap note in the README before running this -- the upgrade
+# below is where a 512 MB Pi runs out of memory.
 
 set -euo pipefail
 
@@ -13,7 +18,6 @@ readonly REPO_URL="https://github.com/codebydch/open-trickler-peripheral.git"
 readonly CODE_DIR="/code"
 readonly REPO_DIR="${CODE_DIR}/open-trickler-peripheral"
 readonly VENV_DIR="${CODE_DIR}/venv"
-readonly SWAP_SIZE=2048
 readonly BLINKA_URL="https://raw.githubusercontent.com/adafruit/Raspberry-Pi-Installer-Scripts/master/raspi-blinka.py"
 
 readonly APT_PACKAGES=(
@@ -42,29 +46,13 @@ check_environment() {
   sudo -v
 }
 
-set_swap_size() {
-  step "Setting swap size to ${SWAP_SIZE} MB"
-  local conf=/etc/dphys-swapfile
-  if [[ ! -f ${conf} ]]; then
-    skip "no ${conf}; this system doesn't use dphys-swapfile."
-    return
-  fi
-  if grep -qE "^CONF_SWAPSIZE=${SWAP_SIZE}$" "${conf}"; then
-    skip "swap is already ${SWAP_SIZE} MB."
-    return
-  fi
-  info "A Pi Zero has too little swap to survive a full upgrade, so ${conf} is being"
-  info "changed from '$(grep -E '^CONF_SWAPSIZE=' "${conf}" || echo 'unset')' to 'CONF_SWAPSIZE=${SWAP_SIZE}'."
-  sudo sed -i "s/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=${SWAP_SIZE}/" "${conf}"
-  sudo dphys-swapfile setup
-  sudo dphys-swapfile swapon
-}
-
 install_packages() {
   step "Installing system packages"
   info "Updating the package lists. This takes a while on a Pi Zero."
   sudo apt-get update
   info "Upgrading installed packages."
+  info "On a Pi with little RAM this is the step that can run out of memory. If it dies"
+  info "here, set up swap (see the README) and run this script again."
   sudo DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade
   info "Installing: ${APT_PACKAGES[*]}"
   sudo DEBIAN_FRONTEND=noninteractive apt-get -y install "${APT_PACKAGES[@]}"
@@ -129,7 +117,6 @@ install_blinka() {
 
 main() {
   check_environment
-  set_swap_size
   install_packages
   create_code_dir
   clone_repository
