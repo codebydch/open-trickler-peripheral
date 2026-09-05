@@ -141,6 +141,13 @@ systemctl status opentrickler --no-pager
 The trickler daemon logs each pulse's on-time and measured dose during the final
 approach, which is the fastest way to see whether the feed rate has been learned sensibly.
 
+If `opentrickler_screen` fails with `/dev/spidev0.0 does not exist`, the SPI interface is
+off — the screen is the only thing that needs it, so everything else will be running fine:
+
+```bash
+sudo raspi-config nonint do_spi 0 && sudo reboot
+```
+
 To update, use [`update.sh`](update.sh) rather than a bare `git pull`:
 
 ```bash

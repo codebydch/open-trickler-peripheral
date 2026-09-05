@@ -50,6 +50,11 @@ rm raspi-blinka.py
 # reboot
 sudo reboot
 
+# SPI, which the Mini PiTFT screen talks over. Blinka's installer is meant to enable this
+# and does not always; without it screen.py dies with "/dev/spidev0.0 does not exist".
+sudo raspi-config nonint do_spi 0
+# check after the next reboot with: ls /dev/spidev*
+
 # Adafruit Display install
 cd /code
 source venv/bin/activate

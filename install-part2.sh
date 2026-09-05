@@ -46,6 +46,11 @@ check_preconditions() {
   fi
   [[ -f "${REPO_DIR}/opentrickler_config.ini" ]] || die "Run this from the repository: ${REPO_DIR} doesn't look like the checkout."
   info "Virtual environment and Blinka are in place."
+  # Not fatal: everything except the screen works without it.
+  if [[ ! -e /dev/spidev0.0 ]]; then
+    warn "SPI is not enabled, so the screen service will not start. Enable it with:"
+    warn "    sudo raspi-config nonint do_spi 0 && sudo reboot"
+  fi
   sudo -v
 }
 
