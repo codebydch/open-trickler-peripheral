@@ -40,6 +40,30 @@ def noop(*args, **kwargs):
     return
 
 
+class classproperty:
+    """A read-only property that is computed from the class rather than an instance.
+
+    These maps used to be written as @classmethod stacked on @property. That combination
+    worked by accident in Python 3.9 and 3.10, was deprecated in 3.11 and removed in 3.13
+    -- and Raspberry Pi OS Trixie ships 3.13, where `cls.resolution_map` silently returned
+    the underlying method instead of the dict:
+
+        TypeError: 'method' object is not subscriptable
+
+    A descriptor does the same job on every version. It also has to work when read from an
+    instance (`self.unit_map`), which is how most of the call sites use it.
+    """
+
+    def __init__(self, func):
+        self.func = func
+        self.__doc__ = func.__doc__
+
+    def __get__(self, instance, owner=None):
+        if owner is None:
+            owner = type(instance)
+        return self.func(owner)
+
+
 class SerialScale:
     """Base class for a digital scale connected over a serial port."""
 
@@ -129,25 +153,20 @@ class SerialScale:
         else:
             self.status = self.StatusMap.UNSTABLE
 
-    @classmethod
-    @property
+    @classproperty
     def unit_map(cls):
         """Mapping of self.unit keys to string units of weight as used by the scale."""
         raise NotImplementedError('')
 
-    @classmethod
-    @property
+    @classproperty
     def reverse_unit_map(cls):
         """Reverse mapping of self.unit_map."""
-        cache_hit =  getattr(cls, '__cached_reverse_unit_map', None)
-        if cache_hit:
-            return cache_hit
-        reversed_map = dict((v, k) for k, v in cls.unit_map.items())
-        cls.__cached_reverse_unit_map = reversed_map
-        return cls.__cached_reverse_unit_map
+        # This used to memoize into cls.__cached_reverse_unit_map, which never hit: the
+        # assignment is name-mangled to _SerialScale__cached_reverse_unit_map while the
+        # getattr looked up the unmangled string. It is a two-entry dict; just build it.
+        return {value: key for key, value in cls.unit_map.items()}
 
-    @classmethod
-    @property
+    @classproperty
     def resolution_map(cls):
         """Map self.Units to matching resolutions with decimal.Decimal values."""
         raise NotImplementedError('')
@@ -212,8 +231,7 @@ class ANDScale(SerialScale):
     timeout=0.1
     """
 
-    @classmethod
-    @property
+    @classproperty
     def unit_map(cls):
         """Mapping of self.unit keys to string units of weight as used by the scale."""
         return {
@@ -221,8 +239,7 @@ class ANDScale(SerialScale):
             'g': cls.Units.GRAMS,
         }
 
-    @classmethod
-    @property
+    @classproperty
     def resolution_map(cls):
         """Map self.units to matching resolutions with decimal.Decimal values."""
         return {
@@ -334,8 +351,7 @@ class CreedmoorScale(SerialScale):
     timeout=0.1
     """
 
-    @classmethod
-    @property
+    @classproperty
     def unit_map(cls):
         """Mapping of self.unit keys to string units of weight as used by the scale."""
         return {
@@ -343,8 +359,7 @@ class CreedmoorScale(SerialScale):
             'g': cls.Units.GRAMS,
          }
 
-    @classmethod
-    @property
+    @classproperty
     def resolution_map(cls):
         """Map self.units to matching resolutions with decimal.Decimal values."""
         return {
@@ -418,8 +433,7 @@ class USSolidScale(SerialScale):
     timeout=0.1
     """
 
-    @classmethod
-    @property
+    @classproperty
     def unit_map(cls):
         """Mapping of self.unit keys to string units of weight as used by the scale."""
         return {
@@ -427,8 +441,7 @@ class USSolidScale(SerialScale):
             'g': cls.Units.GRAMS,
          }
 
-    @classmethod
-    @property
+    @classproperty
     def resolution_map(cls):
         """Map self.units to matching resolutions with decimal.Decimal values."""
         return {

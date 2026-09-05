@@ -176,6 +176,10 @@ a simulated machine, so they run anywhere and cover the parts that are awkward t
 on the bench: frame parsing, motor clamping, every exit path from a charge, and whether a
 charge actually lands on target. `tests/fakes.py` holds the simulated hardware.
 
+Run them on **Python 3.13** if you can, which is what Raspberry Pi OS Trixie ships. A
+passing run on an older interpreter is not proof: stacking `@classmethod` on `@property`
+worked until 3.13 removed it, and the scales module hit that on Trixie and nowhere else.
+
 `utilities/` holds standalone hardware tests for the servo, the display, and logging.
 `trickler/motors.py` and `trickler/scales.py` can each be run directly against a config
 file to exercise the hardware on its own.

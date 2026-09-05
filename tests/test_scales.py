@@ -142,5 +142,59 @@ class StabilityTest(unittest.TestCase):
         self.assertFalse(scale.is_stable)
 
 
+class ClassLevelMapTest(unittest.TestCase):
+    """The unit and resolution maps, which are read off the class as well as the instance.
+
+    These were written as @classmethod stacked on @property. Python 3.9 and 3.10 allowed
+    that combination, 3.11 deprecated it, and 3.13 removed it -- so on Raspberry Pi OS
+    Trixie the trickler died at startup with
+
+        TypeError: 'method' object is not subscriptable
+
+    while every version before it worked. That is the shape of bug these tests cannot
+    catch by exercising behaviour, because on an older interpreter the broken form behaves
+    correctly. So the decorator itself is what is asserted.
+    """
+
+    SCALE_CLASSES = (scales.ANDScale, scales.CreedmoorScale, scales.USSolidScale)
+
+    def test_no_classmethod_stacked_on_property(self):
+        for cls in (scales.SerialScale,) + self.SCALE_CLASSES:
+            for name, attribute in vars(cls).items():
+                with self.subTest(cls=cls.__name__, attribute=name):
+                    self.assertFalse(
+                        isinstance(attribute, classmethod) and
+                        isinstance(attribute.__func__, property),
+                        'chaining @classmethod and @property was removed in Python 3.13; '
+                        'use the classproperty descriptor instead')
+
+    def test_maps_are_subscriptable_from_the_class(self):
+        """What SerialScale.__init__ does on the very first line of a charge."""
+        for cls in self.SCALE_CLASSES:
+            with self.subTest(cls=cls.__name__):
+                self.assertIsInstance(cls.resolution_map[cls.Units.GRAINS], decimal.Decimal)
+                self.assertIn(cls.Units.GRAINS, cls.unit_map.values())
+
+    def test_maps_are_subscriptable_from_an_instance(self):
+        for cls in self.SCALE_CLASSES:
+            with self.subTest(cls=cls.__name__):
+                scale = make_scale(cls, fakes.FakeSerial([]))
+                self.assertEqual(scale.resolution, scale.resolution_map[scale.unit])
+
+    def test_reverse_unit_map_inverts_the_unit_map(self):
+        for cls in self.SCALE_CLASSES:
+            with self.subTest(cls=cls.__name__):
+                self.assertEqual(
+                    cls.reverse_unit_map,
+                    {unit: text for text, unit in cls.unit_map.items()})
+
+    def test_each_scale_declares_a_grain_resolution(self):
+        """The pulse feeder refuses to learn from a dose below this, so a wrong value
+        here quietly stops the machine learning its feed rate."""
+        for cls in self.SCALE_CLASSES:
+            with self.subTest(cls=cls.__name__):
+                self.assertGreater(cls.resolution_map[cls.Units.GRAINS], 0)
+
+
 if __name__ == '__main__':
     unittest.main()
