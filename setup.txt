@@ -50,6 +50,11 @@ rm raspi-blinka.py
 # reboot
 sudo reboot
 
+# SPI, which the Mini PiTFT screen talks over. Blinka's installer is meant to enable this
+# and does not always; without it screen.py dies with "/dev/spidev0.0 does not exist".
+sudo raspi-config nonint do_spi 0
+# check after the next reboot with: ls /dev/spidev*
+
 # Adafruit Display install
 cd /code
 source venv/bin/activate
@@ -78,9 +83,11 @@ unzip -d websocketd websocketd-0.4.1-linux_arm.zip
 cd websocketd
 sudo cp websocketd /usr/sbin
 
-# No GPIO daemon is needed. The trickler motors and the servo both go through gpiozero,
-# which picks its own pin factory (it prefers lgpio). pigpio, which this used to need,
-# has been archived by its author and is not available from Trixie onwards.
+# No GPIO daemon is needed. The trickler motors go through gpiozero, which picks its own
+# pin factory (it prefers lgpio). The servo drives lgpio directly, because gpiozero rounds
+# a servo's pulse width to 200 us steps -- see the GPIO note in README.md. pigpio, which
+# this used to need, has been archived by its author and is gone from Trixie onwards.
+sudo apt install python3-lgpio
 
 # Charge history directory (the trickler creates it, but do it here so ownership is sane)
 sudo mkdir -p /var/lib/opentrickler

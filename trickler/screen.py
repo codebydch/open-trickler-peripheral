@@ -182,9 +182,19 @@ if __name__ == "__main__":
     reset_pin = None
     BAUDRATE = 64000000  # The pi can be very fast!
     
+    # SPI is off in a stock Raspberry Pi OS image, and the failure surfaces three
+    # libraries down as "/dev/spidev0.0 does not exist". Say what to do about it instead
+    # of crash-looping on that traceback.
+    try:
+        spi = board.SPI()
+    except OSError as exc:
+        logging.error('The screen needs the SPI interface, which is not enabled: %s. '
+                      'Enable it with `sudo raspi-config nonint do_spi 0`, then reboot.', exc)
+        raise SystemExit(1) from exc
+
     # Create the ST7789 display:
     disp = st7789.ST7789(
-        board.SPI(),
+        spi,
         cs=cs_pin,
         dc=dc_pin,
         rst=reset_pin,

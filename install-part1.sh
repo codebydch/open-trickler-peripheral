@@ -35,6 +35,9 @@ readonly APT_PACKAGES=(
   python3-dev
   python3-pip
   python3-venv
+  # The servo needs microsecond-accurate pulse widths, so it drives lgpio directly
+  # rather than going through gpiozero. See the GPIO note in the README.
+  python3-lgpio
 )
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -62,6 +65,20 @@ install_packages() {
   sudo DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade
   info "Installing: ${APT_PACKAGES[*]}"
   sudo DEBIAN_FRONTEND=noninteractive apt-get -y install "${APT_PACKAGES[@]}"
+}
+
+enable_spi() {
+  step "Enabling the SPI interface (the Mini PiTFT screen talks over it)"
+  if [[ -e /dev/spidev0.0 ]]; then
+    skip "SPI is already enabled."
+    return
+  fi
+  # Blinka's installer is supposed to do this, and did not on a Trixie install -- the
+  # screen service then dies with "/dev/spidev0.0 does not exist".
+  command -v raspi-config >/dev/null ||
+    die "SPI is off and raspi-config is not installed. Add 'dtparam=spi=on' to /boot/firmware/config.txt and reboot, then re-run this."
+  sudo raspi-config nonint do_spi 0
+  info "SPI enabled. It comes up after the reboot at the end of this script."
 }
 
 create_code_dir() {
@@ -130,6 +147,7 @@ install_blinka() {
 main() {
   check_environment
   install_packages
+  enable_spi
   create_code_dir
   clone_repository
   create_virtualenv

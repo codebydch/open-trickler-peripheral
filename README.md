@@ -141,6 +141,13 @@ systemctl status opentrickler --no-pager
 The trickler daemon logs each pulse's on-time and measured dose during the final
 approach, which is the fastest way to see whether the feed rate has been learned sensibly.
 
+If `opentrickler_screen` fails with `/dev/spidev0.0 does not exist`, the SPI interface is
+off — the screen is the only thing that needs it, so everything else will be running fine:
+
+```bash
+sudo raspi-config nonint do_spi 0 && sudo reboot
+```
+
 To update, use [`update.sh`](update.sh) rather than a bare `git pull`:
 
 ```bash
@@ -186,31 +193,40 @@ file to exercise the hardware on its own.
 
 ## A note on GPIO libraries
 
-Both the trickler motors and the powder-measure servo go through
-[gpiozero](https://gpiozero.readthedocs.io/), which selects its own pin factory and
-prefers `lgpio`. Nothing here talks to a GPIO library directly, and there is no GPIO
-daemon to install or keep running.
+The trickler motors go through [gpiozero](https://gpiozero.readthedocs.io/), which selects
+its own pin factory and prefers `lgpio`. The **servo does not** — it talks to
+[lgpio](https://abyz.me.uk/lg/py_lgpio.html) directly. That is worth explaining, because it
+is the one place this project reaches past gpiozero.
 
-This used to use [pigpio](https://github.com/joan2937/pigpio) for the servo. Its author
-has archived it in favour of [lg / rgpiod](https://abyz.me.uk/lg/rgpiod.html), and it is
-not packaged at all from Raspberry Pi OS Trixie onwards, so the servo now uses gpiozero's
-`AngularServo`. The angle-to-pulse-width mapping is unchanged — `AngularServo` does the
-same linear interpolation between `min_pulse_width` and `max_pulse_width` that the old
-code did by hand.
+A servo is positioned by the width of a pulse repeated every 20 ms, and 1 µs of pulse is
+roughly a tenth of a degree. gpiozero drives one with a PWM device, and its lgpio backend
+sets the duty cycle like this:
 
-One behavioural difference: the servo is released once it has finished moving, rather
-than being held at its initial angle between charges. Two reasons. Software-timed PWM
-makes an idle servo buzz and hunt around its setpoint, which wastes power and heats the
-motor, and the measure holds its own position mechanically anyway. More importantly, a
-GPIO pin can only be held by one process at a time now — `pigpiod` used to let the
-trickler and the servo setup page share it, and without a daemon they cannot. The trickler
-therefore claims the servo pin only while it is actually dumping powder.
+```python
+self._pwm = (freq, int(value * 100))     # gpiozero/pins/lgpio.py
+```
 
-That means the servo page at `/servo/` works whenever the trickler is idle, and reports
-that the pin is busy if you try to use it mid-charge. If your measure relies on the servo
-actively holding the lever, remove the `servo_motor.off()` call after the powder dump in
-`trickler/main.py` — but be aware that leaving it holding the pin locks the servo page
-out.
+The duty cycle is truncated to a **whole percent**, which at 50 Hz is a 200 µs step in
+pulse width, always rounding down. On this machine a commanded 1522 µs arrived as 1400 µs
+and the measure dropped half a charge; commanding one more degree — 98° to 99° — crossed a
+percent boundary and swung the horn a quarter turn. `lgpio.tx_servo()` takes microseconds,
+which is what [pigpio](https://github.com/joan2937/pigpio)'s `set_servo_pulsewidth()` did
+before its author archived it in favour of [lg](https://abyz.me.uk/lg/rgpiod.html), so the
+timing is back to what the measure was set up against.
+
+Owning the `gpiochip` handle also fixes pin sharing. gpiozero's `Device.close()` does not
+release an lgpio line — `LGPIOPin.close()` re-claims it as an input, and the line is only
+freed when the factory's chip handle closes — so the trickler held GPIO17 for the life of
+the process and `/servo/` answered `GPIO busy`. The trickler now claims the line only while
+it is actually dumping powder, and closes the handle afterwards.
+
+Two consequences worth knowing. The servo is released once it has finished moving rather
+than held at its initial angle: an idle servo on a software-timed signal buzzes and hunts,
+and the measure holds its own position mechanically. And `/servo/` works whenever the
+trickler is idle, reporting a readable message if you try to use it mid-charge. If your
+measure relies on the servo actively holding the lever, remove the `servo_motor.off()` call
+after the powder dump in `trickler/main.py` — but be aware that leaving it holding the line
+locks the servo page out.
 
 ## References
 

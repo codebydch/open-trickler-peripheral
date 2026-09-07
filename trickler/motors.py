@@ -13,8 +13,36 @@ import time
 import atexit
 import enum
 import logging
+import os
 
 import gpiozero
+
+try:
+    import lgpio
+except ImportError:  # Not a Pi -- only the servo needs it, and tests inject a fake.
+    lgpio = None
+
+
+# Pulse widths outside this range are past what a hobby servo will accept, and driving
+# one there parks it against its end stop where it buzzes, heats and stalls.
+MIN_SERVO_PULSE_US = 400
+MAX_SERVO_PULSE_US = 2600
+
+
+def gpiochip_number():
+    """Which /dev/gpiochip the header pins are on.
+
+    The Pi 5 moved them to gpiochip4; everything before it uses gpiochip0.
+    """
+    if os.path.exists('/dev/gpiochip4'):
+        try:
+            with open('/proc/device-tree/model', 'rb') as model_file:
+                model = model_file.read().decode('utf-8', 'replace')
+        except OSError:
+            model = ''
+        if 'Raspberry Pi 5' in model:
+            return 4
+    return 0
 
 class TricklerMotor:
     """Controls a small vibration DC motor with the PWM controller on the Pi."""
@@ -80,12 +108,28 @@ class TricklerMotor:
         return self.pwm.value
 
 class ServoMotor:
-    """Controls a servo motor for a Powder Measure with the PWM controller on the Pi.
+    """Controls the powder measure's servo.
 
-    Uses gpiozero rather than a GPIO library directly. gpiozero picks its own pin
-    factory -- it prefers lgpio -- so this keeps working across the backend changes
-    Raspberry Pi OS has been through. pigpio, which this used to use, is archived and is
-    not available at all from Trixie onwards.
+    This talks to lgpio directly rather than going through gpiozero, which is unusual in
+    this project and deliberate. gpiozero drives a servo with `PWMOutputDevice`, and its
+    lgpio backend truncates the duty cycle to a whole percent:
+
+        self._pwm = (freq, int(value * 100))     # gpiozero/pins/lgpio.py
+
+    At the 50 Hz servo frame that is a 200 microsecond step in pulse width, always
+    rounding down -- about 27 degrees of travel on a 270 degree servo. It is why the
+    measure dropped half a charge: a commanded 1522 us became 1400 us, and why one degree
+    of commanded angle could move the horn a quarter turn, by crossing a percent boundary.
+
+    lgpio.tx_servo() takes the pulse width in microseconds, which is what pigpio's
+    set_servo_pulsewidth() did before it was archived, so the timing is back to what this
+    machine was set up against.
+
+    Owning the gpiochip handle also fixes pin sharing. gpiozero's Device.close() does not
+    release an lgpio line -- LGPIOPin.close() re-claims it as an input, and the line is
+    only freed when the factory's chip handle closes -- so the trickler held GPIO17 for
+    its whole life and the servo setup page got 'GPIO busy'. Closing our own handle in
+    off() hands the line back for real.
     """
 
     def __init__(self, config, **kwargs):
@@ -102,11 +146,12 @@ class ServoMotor:
         self.min_pulse_width = float(kwargs.get('min_pulse_width', config['servo']['min_pulse_width']))
         self.max_pulse_width = float(kwargs.get('max_pulse_width', config['servo']['max_pulse_width']))
 
-        # The pin is claimed only while the servo is actually moving, and released again
-        # by off(). pigpiod used to let the trickler and the servo setup page drive the
-        # same pin from separate processes; without a daemon, whichever holds the pin
-        # locks the other out, so hold it for as little time as possible.
-        self.servo = None
+        # Injectable so the tests can drive a fake in place of the hardware.
+        self._lgpio = kwargs.get('lgpio', lgpio)
+        self._chip = kwargs.get('gpiochip', None)
+        # The chip handle is held only while the servo is moving. See the class docstring.
+        self._handle = None
+        self.angle = None
         logging.debug(
             'Created servo motor on PIN %r with angles %r and %r',
             self.servo_pin,
@@ -115,54 +160,81 @@ class ServoMotor:
         atexit.register(self._graceful_exit)
 
     def _graceful_exit(self):
-        """Graceful exit function, turn off servo, and release the pin."""
+        """Graceful exit function, stops the servo and releases the GPIO line."""
         logging.debug('Closing servo motor...')
         self.off()
-        self.stop()
+
+    def pulse_width(self, angle):
+        """The pulse width in microseconds for an angle, as pigpio was given directly.
+
+        Linear between the two configured pulse widths, which is both what the pigpio
+        version of this class computed by hand and what gpiozero's AngularServo does.
+        """
+        span = self.max_pulse_width - self.min_pulse_width
+        pulse = self.min_pulse_width + (angle / self.max_angle) * span
+        if not MIN_SERVO_PULSE_US <= pulse <= MAX_SERVO_PULSE_US:
+            raise ValueError(
+                'Angle %g maps to a %g us pulse, outside the %g-%g us a servo accepts. '
+                'Check servo_angle, max_angle and the pulse widths in the config.'
+                % (angle, pulse, MIN_SERVO_PULSE_US, MAX_SERVO_PULSE_US))
+        return pulse
 
     def _open(self):
-        """Returns the servo, claiming the GPIO pin if it is not already held.
+        """Claims the GPIO line, if it is not already held."""
+        if self._handle is not None:
+            return self._handle
+        if self._lgpio is None:
+            raise RuntimeError(
+                'The lgpio module is not available, so the servo cannot be driven. '
+                'Install it with: sudo apt install python3-lgpio')
+        chip = gpiochip_number() if self._chip is None else self._chip
+        self._handle = self._lgpio.gpiochip_open(chip)
+        self._lgpio.gpio_claim_output(self._handle, self.servo_pin)
+        return self._handle
 
-        AngularServo maps angle to pulse width linearly between the two bounds, which is
-        exactly the calculation this class used to do by hand against pigpio. Note the
-        config is in microseconds and gpiozero wants seconds.
-        """
-        if self.servo is None or self.servo.closed:
-            self.servo = gpiozero.AngularServo(
-                self.servo_pin,
-                # Don't move on open: claiming the pin should not twitch the measure.
-                initial_angle=None,
-                min_angle=0,
-                max_angle=self.max_angle,
-                min_pulse_width=self.min_pulse_width / 1e6,
-                max_pulse_width=self.max_pulse_width / 1e6)
-        return self.servo
+    def move_to(self, angle):
+        """Moves the servo to an angle and holds it there until off()."""
+        pulse = self.pulse_width(angle)
+        handle = self._open()
+        logging.debug('Servo to %g degrees (%g us pulse)', angle, pulse)
+        self._lgpio.tx_servo(handle, self.servo_pin, int(round(pulse)))
+        self.angle = angle
 
     def set_initial_angle(self):
         """Sets servo initial angle."""
-        self._open().angle = self.initial_angle
+        self.move_to(self.initial_angle)
 
     def run_servo(self):
         """Moves servo to wanted angle."""
-        self._open().angle = self.servo_angle
+        self.move_to(self.servo_angle)
 
     def off(self):
-        """Stops driving the servo and releases the GPIO pin.
+        """Stops driving the servo and releases the GPIO line.
 
-        Two reasons to do this as soon as the servo has finished moving. An idle servo
-        held on a software-timed PWM signal buzzes and hunts around its setpoint, which
-        wastes power and heats the motor; the powder measure holds its own position
-        mechanically. And the pin is a shared resource -- the servo setup page runs in a
-        different process and cannot open GPIO pins this one is still holding.
+        Three reasons to do this as soon as the servo has finished moving: a held servo
+        buzzes and hunts around its setpoint, wasting power and heating the motor; the
+        measure holds its own position mechanically; and the servo setup page is a
+        separate process, which cannot open a line this one still holds.
 
         Safe to call when the servo was never opened, or has already been released.
         """
-        if self.servo is not None and not self.servo.closed:
-            self.servo.detach()
-            self.servo.close()
+        if self._handle is None:
+            return
+        try:
+            # Zero stops the pulse train, so the servo stops being driven.
+            self._lgpio.tx_servo(self._handle, self.servo_pin, 0)
+            self._lgpio.gpio_free(self._handle, self.servo_pin)
+        except Exception:  # The line is being released either way; never mask that.
+            logging.debug('Servo did not stop cleanly.', exc_info=True)
+        finally:
+            try:
+                self._lgpio.gpiochip_close(self._handle)
+            finally:
+                self._handle = None
+                self.angle = None
 
     def stop(self):
-        """Releases the GPIO pin. Safe to call more than once."""
+        """Releases the GPIO line. Safe to call more than once."""
         self.off()
 
 
@@ -253,6 +325,8 @@ if __name__ == '__main__':
     servo_motor.run_servo()
     time.sleep(1.5)
     servo_motor.set_initial_angle()
+    time.sleep(1)
+    servo_motor.off()
     for x in range(1, 101):
         motor.set_speed(x / 100)
         time.sleep(.05)
