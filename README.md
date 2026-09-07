@@ -27,11 +27,24 @@ The pulse feeder is the part that decides accuracy. A vibratory motor can't be d
 slower than its stall point, so the only way to control how much powder lands is to
 control how long it runs. Each pulse is aimed at a fraction of what's left, fired, and
 then weighed once the scale reports stable — nothing is fed until the last thing fed has
-been measured. It waits `settle_min_time` before believing that "stable", because for the
+been measured.
+
+Weighing is what costs the time: a pulse takes a fraction of a second to fire and about
+half a second to weigh, whatever it delivered. So pulses fired while there is still a way
+to go run at `pulse_fast_pwm`, and only the last ones — inside `pulse_fast_until` — drop
+to the fine `pulse_pwm`. Fewer, larger pulses, without coarsening the smallest dose the
+machine can place, which is what the accuracy rests on. Simply running the motor faster
+throughout does the opposite: it is quicker and it misses. It waits `settle_min_time` before believing that "stable", because for the
 first moment after a pulse the powder is still in the air and the undisturbed pan reads as
 settled at the old weight. The measured dose corrects a running estimate of grains per second of
 motor on-time, so pulse length adapts to the powder instead of being configured. It stops
 when another pulse would miss the target by more than stopping short does.
+
+Each speed has its own measured rate, since a vibratory feeder's throughput against
+drive is not reliably linear, and a pulse at a speed nothing has been weighed at is a
+short probe rather than an aimed dose. Both account for the motor's spin-up
+(`pulse_dead_time`): without that, a rate measured from a short pulse reads low — most of
+that pulse was spin-up — and the pulse sized from it comes out too long.
 
 That learned rate is kept between charges and shown on the tuning page, scoped to the
 selected **powder profile** — so switching from a stick powder to a ball powder switches
@@ -113,7 +126,9 @@ place. The sections worth knowing:
   the floor the motor is driven at; set it just above the speed where powder stops
   moving.
 - `[trickler]` — the final approach. `fine_trickle_weight`, `pulse_trickle_weight`,
-  pulse timing, and the learned-rate seed. All weights are in **grains** and converted
+  the two pulse speeds (`pulse_pwm` and `pulse_fast_pwm`, with `pulse_fast_until`
+  deciding where one hands over to the other), pulse timing, and the learned-rate seed.
+  Setting `pulse_fast_pwm` equal to `pulse_pwm` gives single-speed pulsing back. All weights are in **grains** and converted
   automatically if the scale is set to grams.
 - `[history]` — where charges are recorded (`/var/lib/opentrickler/charges.csv` by
   default, outside the repo so a `git pull` can't disturb it) and how many rows to keep.

@@ -108,10 +108,16 @@ def active_profile():
     return selected or ''
 
 
-def learned_rate(profile=None):
-    """The feed rate learned for a profile, or None if it hasn't learned one yet."""
+def learned_rate(profile=None, fast=False):
+    """A feed rate learned for a profile, or None if it hasn't learned one yet.
+
+    One per pulse speed: the fine speed that finishes a charge, and the fast one used
+    while there is still a way to go. They are measured separately because a vibratory
+    feeder's throughput against drive is not reliably linear.
+    """
     profile = active_profile() if profile is None else profile
-    key = constants.TRICKLER_PULSE_RATE.value
+    key = (constants.TRICKLER_FAST_PULSE_RATE.value if fast
+           else constants.TRICKLER_PULSE_RATE.value)
     return safe_get('%s:%s' % (key, profile) if profile else key)
 
 
@@ -136,7 +142,8 @@ def render_config(errors=None, notice=None):
         notice=notice,
         profiles=helpers.list_profiles(config),
         profile=active_profile(),
-        learned_rate=learned_rate())
+        learned_rate=learned_rate(),
+        learned_fast_rate=learned_rate(fast=True))
 
 
 @app.route('/app/history')
@@ -186,6 +193,9 @@ def update_profile():
         rate = learned_rate(name) or learned_rate()
         if rate:
             values['pulse_rate'] = '%g' % float(rate)
+        # Only the fine rate is stored: it is the one [trickler] has a setting for.
+        # The fast rate lives in memcache and is re-measured with a single probe pulse
+        # after a reboot, which costs less than another setting to keep in step.
         try:
             helpers.update_ini_section(args.config_file, helpers.profile_section(name), values)
             config.read(args.config_file)
@@ -209,13 +219,14 @@ def trickler_config():
 def update_trickler_config():
     """Applies submitted tuning values live, and writes them back to the config file."""
     if 'reset_learned' in request.form:
-        key = constants.TRICKLER_PULSE_RATE.value
         profile = active_profile()
-        memcache_client.delete('%s:%s' % (key, profile) if profile else key)
-        logging.info('Cleared the learned pulse rate.')
+        for key in (constants.TRICKLER_PULSE_RATE.value,
+                    constants.TRICKLER_FAST_PULSE_RATE.value):
+            memcache_client.delete('%s:%s' % (key, profile) if profile else key)
+        logging.info('Cleared the learned pulse rates.')
         return render_config(
-            notice='Learned pulse rate cleared. The next charge starts from the '
-                   'starting feed rate below and learns again from there.')
+            notice='Learned pulse rates cleared. The next charge starts from the '
+                   'starting feed rate below and measures both speeds again.')
 
     if 'reset_overrides' in request.form:
         memcache_client.delete(constants.TRICKLER_SETTINGS.value)
@@ -242,6 +253,7 @@ def status():
     weight = safe_get(constants.SCALE_WEIGHT.value)
     speed = safe_get(constants.TRICKLER_MOTOR_SPEED.value)
     rate = learned_rate()
+    fast_rate = learned_rate(fast=True)
     target = safe_get(constants.TARGET_WEIGHT.value)
     return jsonify(
         scale_weight=None if weight is None else str(weight),
@@ -250,6 +262,7 @@ def status():
         auto_mode=bool(safe_get(constants.AUTO_MODE.value, False)),
         motor_speed=None if speed is None else round(float(speed), 3),
         pulse_rate=None if rate is None else round(float(rate), 4),
+        fast_pulse_rate=None if fast_rate is None else round(float(fast_rate), 4),
         profile=active_profile(),
         # Set when the trickler stopped because the powder measure dropped nothing.
         dump_error=safe_get(constants.DUMP_ERROR.value, '') or '')

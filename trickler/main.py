@@ -55,6 +55,14 @@ MIN_PULSE_RATE = 0.02
 # means an empty hopper or a jammed tube, not something more trickling will fix.
 MAX_EMPTY_PULSES = 8
 
+# The first pulse at a speed nothing has been measured at runs for this many of the
+# shortest pulses the machine can place, and is also held to this fraction of what the
+# guessed rate says would fill the gap. See PulseFeeder._probe_time.
+FAST_PROBE_PULSES = 4
+FAST_PROBE_SAFETY = 4
+# How far a probe may be lengthened when its dose lands under the scale's resolution.
+MAX_FAST_PROBE = 8
+
 # Backstop on the final approach. Even with the give-up counters above, a pathological
 # cycle should not wedge the daemon on one charge.
 MAX_PULSE_PHASE_SECONDS = 120.0
@@ -69,8 +77,11 @@ TricklerSettings = collections.namedtuple('TricklerSettings', (
     'pulse_trickle_weight',
     'pulse_on_time',
     'pulse_min_on_time',
+    'pulse_dead_time',
     'pulse_off_time',
     'pulse_pwm',
+    'pulse_fast_pwm',
+    'pulse_fast_until',
     'settle_min_time',
     'stall_pwm',
     'pulse_rate',
@@ -155,9 +166,18 @@ class PulseFeeder:
         self._settings = settings
         self._memcache = memcache
         self._constants = constants
-        # Grains (or grams) delivered per second of motor on-time.
+        # Grains (or grams) delivered per second of motor on-time, at each of the two
+        # pulse speeds. Both are measured rather than assumed: a vibratory feeder's
+        # throughput against drive is not reliably linear, and the whole point of
+        # learning the slow rate applies just as much to the fast one.
         self._rate = float(settings.pulse_rate)
+        # The configured pulse_rate is a starting guess, not a measurement. Until a pulse
+        # has actually been weighed at a speed, pulses there are probes rather than aimed
+        # doses -- see _probe_time().
+        self._rate_measured = False
+        self._fast_rate = None
         self._rate_key = None
+        self._fast_rate_key = None
         if memcache is not None and constants is not None:
             # Scoped to the profile, so switching powder switches the estimate instead of
             # blending two powders into an average that fits neither.
@@ -165,8 +185,18 @@ class PulseFeeder:
             learned = memcache.get(self._rate_key)
             if learned:
                 self._rate = max(float(learned), MIN_PULSE_RATE)
+                self._rate_measured = True
+            self._fast_rate_key = learned_rate_key(
+                constants, settings.profile, fast=True)
+            learned_fast = memcache.get(self._fast_rate_key)
+            if learned_fast:
+                self._fast_rate = max(float(learned_fast), MIN_PULSE_RATE)
         self.empty_pulses = 0
         self.pulses = 0
+        # How many minimum-length pulses the next fast probe runs for. Doubles whenever a
+        # probe lands under the scale's resolution, since a dose that reads as zero
+        # measures nothing.
+        self._fast_probe = 1
 
     @property
     def settings(self):
@@ -179,9 +209,31 @@ class PulseFeeder:
         return self._rate
 
     @property
+    def fast_rate(self):
+        """Weight per second of motor on-time at the fast pulse speed.
+
+        Until a pulse has actually been measured at that speed there is nothing to go on,
+        so the slow rate is scaled by drive above the stall point as a first guess. It
+        only has to be close enough for one pulse: the measured result replaces it.
+        """
+        if self._fast_rate is not None:
+            return self._fast_rate
+        stall = self._settings.stall_pwm
+        slow = max(self._settings.pulse_pwm, stall)
+        fast = max(self._settings.pulse_fast_pwm, stall)
+        if slow <= stall:
+            return self._rate
+        return self._rate * ((fast - stall) / (slow - stall))
+
+    def _moving_time(self, on_time):
+        """The part of a pulse that actually moved powder, after the motor spun up."""
+        return on_time - self._settings.pulse_dead_time
+
+    @property
     def min_dose(self):
         """Smallest amount of powder a single pulse can deliver."""
-        return decimal.Decimal(str(self._rate * self._settings.pulse_min_on_time))
+        return decimal.Decimal(str(
+            self._rate * max(self._moving_time(self._settings.pulse_min_on_time), 0.0)))
 
     def done(self, remainder):
         """True once another pulse would miss the target by more than stopping short does."""
@@ -192,31 +244,90 @@ class PulseFeeder:
         return settled_weight(self._scale, self._settings.settle_timeout, min_wait)
 
     def feed(self, remainder):
-        """Fires one pulse aimed at part of `remainder`, returning what it actually delivered."""
-        # Aim short of what's left so a mis-estimate lands under the target rather than
-        # over it. The next pulse closes whatever remains.
-        wanted = float(remainder) * self._settings.pulse_aim
-        on_time = wanted / self._rate if self._rate > 0 else self._settings.pulse_on_time
+        """Fires one pulse aimed at part of `remainder`, returning what it actually delivered.
+
+        Pulses far from the target are fired at `pulse_fast_pwm`, close ones at the fine
+        `pulse_pwm`. Every pulse costs the same wait to weigh it whatever its size, so
+        the way to a quicker charge is fewer, larger pulses -- and the way *not* to do it
+        is a faster motor throughout, which would coarsen the smallest dose the machine
+        can place and with it the accuracy.
+        """
+        fast = self._use_fast_speed(remainder)
+        if not self._measured(fast):
+            on_time = self._probe_time(remainder, fast)
+        else:
+            # Aim short of what's left so a mis-estimate lands under the target rather
+            # than over it. The next pulse closes whatever remains.
+            if fast:
+                rate = self.fast_rate
+                # A fast pulse aims only at the gap down to where fine pulsing takes
+                # over, never at the target itself: its job is to get the charge close
+                # cheaply, and the fine pulses place the last of it.
+                wanted = float(remainder - self._settings.pulse_fast_until)
+            else:
+                rate = self._rate
+                wanted = float(remainder)
+            wanted *= self._settings.pulse_aim
+            on_time = (wanted / rate + self._settings.pulse_dead_time
+                       if rate > 0 else self._settings.pulse_on_time)
         on_time = min(max(on_time, self._settings.pulse_min_on_time), self._settings.pulse_on_time)
 
         before = self._scale.weight
         self.pulses += 1
-        self._motor.set_speed(self._pulse_speed())
+        self._motor.set_speed(self._pulse_speed(fast))
         time.sleep(on_time)
         self._motor.off()
         # Let the powder land before asking the scale what happened.
         time.sleep(self._settings.pulse_off_time)
         dose = self.settled_weight(self._settings.settle_min_time) - before
-        self._learn(on_time, dose)
+        self._learn(on_time, dose, fast)
         return on_time, dose
 
-    def _pulse_speed(self):
-        """Pulse speed as a 0-1 PWM value, never below the point where the motor stalls."""
-        pwm = min(max(self._settings.pulse_pwm, self._settings.stall_pwm), 100.0)
-        return pwm / 100
+    def _measured(self, fast):
+        """Whether a pulse has ever been weighed at this speed."""
+        return self._fast_rate is not None if fast else self._rate_measured
 
-    def _learn(self, on_time, dose):
-        """Folds one measured pulse into the running feed-rate estimate."""
+    def _probe_time(self, remainder, fast):
+        """How long the first pulse at a speed should run, before anything has been
+        measured there.
+
+        Sizing a pulse needs a rate, and the only rate available for a speed nothing has
+        been measured at is a guess scaled off the fine one, which can be several times
+        out. So this pulse is a measurement rather than an aimed dose, bounded two ways:
+
+        - in absolute terms, a few times the shortest pulse the machine can place. Not
+          the shortest: most of a minimum pulse is the motor spinning up, so a dose
+          measured from one reads far lower than the real feed rate, and a rate learned
+          that low makes the *next* pulse several times too long.
+        - against the gap it is aiming into, at a fraction of what the guessed rate says
+          would fill it, so that a guess which is badly low still cannot overshoot.
+
+        One measured pulse replaces the guess, and the result is kept per powder profile,
+        so this is paid once rather than every charge.
+        """
+        settings = self._settings
+        dead = settings.pulse_dead_time
+        absolute = dead + settings.pulse_min_on_time * FAST_PROBE_PULSES * self._fast_probe
+        gap = float(remainder - settings.pulse_fast_until) if fast else float(remainder)
+        guess = self.fast_rate if fast else self._rate
+        against_gap = (dead + gap / (guess * FAST_PROBE_SAFETY)) if guess > 0 else absolute
+        # Never shorter than the spin-up plus one minimum pulse: a probe that delivers
+        # nothing measures nothing.
+        floor = dead + settings.pulse_min_on_time
+        return max(min(absolute, against_gap, settings.pulse_on_time), floor)
+
+    def _use_fast_speed(self, remainder):
+        """True while there is enough left to be worth a coarse pulse."""
+        return (self._settings.pulse_fast_pwm > self._settings.pulse_pwm and
+                remainder > self._settings.pulse_fast_until)
+
+    def _pulse_speed(self, fast=False):
+        """Pulse speed as a 0-1 PWM value, never below the point where the motor stalls."""
+        pwm = self._settings.pulse_fast_pwm if fast else self._settings.pulse_pwm
+        return min(max(pwm, self._settings.stall_pwm), 100.0) / 100
+
+    def _learn(self, on_time, dose, fast=False):
+        """Folds one measured pulse into the feed-rate estimate for the speed it used."""
         if dose < 0:
             # Pan knocked, or the scale drifted down. The rate estimate can't learn
             # anything from it, but it still counts as a pulse that got us no closer --
@@ -239,20 +350,49 @@ class PulseFeeder:
         if dose < resolution:
             logging.debug('Pulse dose %r is below the scale resolution %r; not learning '
                           'from it.', dose, resolution)
+            if not self._measured(fast):
+                # The probe was too short to read. Lengthen the next one rather than
+                # probing at the same length forever.
+                self._fast_probe = min(self._fast_probe * 2, MAX_FAST_PROBE)
             return
 
-        observed = float(dose) / on_time
-        self._rate = max(self._rate + (observed - self._rate) * PULSE_RATE_LEARN, MIN_PULSE_RATE)
+        moving = self._moving_time(on_time)
+        if moving <= 0:
+            logging.debug('Pulse of %rs was all spin-up; nothing to learn from.', on_time)
+            return
+        observed = float(dose) / moving
+        # Each speed has its own estimate. Folding a fast pulse into the slow rate would
+        # make the fine pulses at the end of a charge far too long.
+        if not self._measured(fast):
+            # The first real measurement at a speed replaces its guess outright. Easing
+            # towards it from a guess that could be several times out would leave the
+            # next pulse sized on a number nothing has ever measured.
+            updated = max(observed, MIN_PULSE_RATE)
+            self._fast_probe = 1
+        else:
+            current = self.fast_rate if fast else self._rate
+            updated = max(current + (observed - current) * PULSE_RATE_LEARN, MIN_PULSE_RATE)
         logging.debug(
-            'pulse on_time: %r dose: %r -> rate: %r (min dose %r)',
-            on_time, dose, self._rate, self.min_dose)
-        if self._memcache is not None and self._rate_key is not None:
-            self._memcache.set(self._rate_key, self._rate)
+            'pulse on_time: %r dose: %r at %s speed -> rate: %r (min dose %r)',
+            on_time, dose, 'fast' if fast else 'fine', updated, self.min_dose)
+        if fast:
+            self._fast_rate = updated
+            key = self._fast_rate_key
+        else:
+            self._rate = updated
+            self._rate_measured = True
+            key = self._rate_key
+        if self._memcache is not None and key is not None:
+            self._memcache.set(key, updated)
 
 
-def learned_rate_key(constants, profile):
-    """The memcache key holding the learned feed rate for one powder profile."""
-    base = constants.TRICKLER_PULSE_RATE.value
+def learned_rate_key(constants, profile, fast=False):
+    """The memcache key holding a learned feed rate for one powder profile.
+
+    One key per pulse speed, since the two are measured separately.
+    """
+    base = (constants.TRICKLER_FAST_PULSE_RATE.value if fast
+            else constants.TRICKLER_PULSE_RATE.value)
     return '%s:%s' % (base, profile) if profile else base
 
 
@@ -337,8 +477,11 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
         pulse_trickle_weight=decimal.Decimal(section['pulse_trickle_weight']) * factor,
         pulse_on_time=float(section['pulse_on_time']),
         pulse_min_on_time=float(section['pulse_min_on_time']),
+        pulse_dead_time=float(section['pulse_dead_time']),
         pulse_off_time=float(section['pulse_off_time']),
         pulse_pwm=float(section['pulse_pwm']),
+        pulse_fast_pwm=float(section['pulse_fast_pwm']),
+        pulse_fast_until=decimal.Decimal(section['pulse_fast_until']) * factor,
         settle_min_time=float(section['settle_min_time']),
         stall_pwm=float(section['stall_pwm']),
         # The seed rate is in grains per second; convert it the same way as the weights.

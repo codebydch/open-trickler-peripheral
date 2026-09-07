@@ -180,7 +180,10 @@ class ProfileTest(unittest.TestCase):
         config = fakes.load_config(profiles={'Varget': {'pulse_rate': '0.42'}},
                                    active_profile='Varget')
         settings = self.settings_for(config)
-        self.assertEqual(settings.pulse_on_time, 0.2)
+        # Read from the config rather than written here, so tuning a default doesn't
+        # look like a broken fall-through.
+        self.assertEqual(settings.pulse_on_time,
+                         float(config['trickler']['pulse_on_time']))
 
     def test_live_overrides_still_beat_the_profile(self):
         config = fakes.load_config(profiles={'Varget': {'pulse_trickle_weight': '0.9'}},

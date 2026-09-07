@@ -163,6 +163,7 @@
         <div>Target<span id="target">&mdash;</span></div>
         <div>Motor<span id="motor">&mdash;</span></div>
         <div>Learned feed rate<span id="rate">&mdash;</span></div>
+        <div>Learned fast rate<span id="fastrate">&mdash;</span></div>
         <div>Auto mode<span id="auto">&mdash;</span></div>
         <div>Scale reading<span id="stable">&mdash;</span></div>
       </div>
@@ -188,6 +189,10 @@
           {% if profile %}Using <strong>{{ profile }}</strong>.{% else %}No profile selected.{% endif %}
           Learned feed rate:
           <strong>{% if learned_rate %}{{ '%.4f'|format(learned_rate|float) }} /s{% else %}not learned yet{% endif %}</strong>
+          at the fine speed,
+          <strong>{% if learned_fast_rate %}{{ '%.4f'|format(learned_fast_rate|float) }} /s{% else %}not measured yet{% endif %}</strong>
+          at the fast one. Only the fine rate is saved into a profile; the fast one is
+          measured again with a single pulse after a restart.
         </p>
       </div>
 
@@ -244,6 +249,9 @@
               data.motor_speed === null ? '—' : Math.round(data.motor_speed * 100) + '%';
             document.getElementById('rate').textContent =
               data.pulse_rate === null ? 'not learned yet' : data.pulse_rate + ' /s';
+            document.getElementById('fastrate').textContent =
+              data.fast_pulse_rate === null ? 'not learned yet'
+                                            : data.fast_pulse_rate + ' /s';
             document.getElementById('auto').textContent = data.auto_mode ? 'ON' : 'OFF';
             document.getElementById('stable').textContent =
               data.scale_is_stable ? 'stable' : 'moving';

@@ -120,8 +120,14 @@ TRICKLER_SETTINGS = (
         'Grains still to go when continuous trickling stops for good. Below this every '
         'pulse is weighed before the next one is fired.'),
     TricklerSetting(
-        'pulse_on_time', 'Longest pulse', '0.2', 0.005, 2.0, 0.005,
-        'Seconds. Upper limit on how long a single pulse may run.'),
+        'pulse_on_time', 'Longest pulse', '0.6', 0.005, 2.0, 0.005,
+        'Seconds. Upper limit on how long a single pulse may run. Every pulse costs the '
+        'same wait to weigh it, so a cap that forces extra pulses costs real time.'),
+    TricklerSetting(
+        'pulse_dead_time', 'Motor spin-up', '0.02', 0.0, 0.5, 0.005,
+        'Seconds at the start of a pulse before the motor is actually moving powder. '
+        'Without it, a rate measured from a short pulse reads low -- most of that pulse '
+        'was spin-up -- and the next pulse comes out too long.'),
     TricklerSetting(
         'pulse_min_on_time', 'Shortest pulse', '0.03', 0.005, 2.0, 0.005,
         'Seconds. The smallest pulse worth firing. This sets the finest dose the machine '
@@ -136,7 +142,19 @@ TRICKLER_SETTINGS = (
         'reads as delivering nothing and makes the feeder over-pulse.'),
     TricklerSetting(
         'pulse_pwm', 'Pulse speed', '25', 0.0, 100.0, 1.0,
-        'PWM %. Motor speed while pulsing. Never actually driven below the stall speed.'),
+        'PWM %. Motor speed for the fine pulses that finish a charge. Never actually '
+        'driven below the stall speed. This sets how fine a dose the machine can place, '
+        'so it is the setting accuracy depends on.'),
+    TricklerSetting(
+        'pulse_fast_pwm', 'Fast pulse speed', '45', 0.0, 100.0, 1.0,
+        'PWM %. Motor speed for pulses fired while still well short of target. Bigger '
+        'doses mean fewer pulses and a quicker charge, and accuracy is unaffected '
+        'because the last pulses drop back to the fine speed. Set it equal to the pulse '
+        'speed to use one speed throughout.'),
+    TricklerSetting(
+        'pulse_fast_until', 'Fine pulses below', '0.10', 0.0, 5.0, 0.01,
+        'Grains still to go when pulsing drops from the fast speed to the fine one. '
+        'Raise it if charges run heavy.'),
     TricklerSetting(
         'stall_pwm', 'Stall speed', '20', 0.0, 100.0, 1.0,
         'PWM %. The speed below which the vibratory motor moves no powder at all.'),
@@ -145,7 +163,7 @@ TRICKLER_SETTINGS = (
         'Grains per second of pulsing. Only a first guess: the feeder measures each pulse '
         'and learns the real figure from there.'),
     TricklerSetting(
-        'pulse_aim', 'Pulse aim', '0.7', 0.1, 1.0, 0.05,
+        'pulse_aim', 'Pulse aim', '0.85', 0.1, 1.0, 0.05,
         'Fraction of the remaining weight each pulse aims at. Below 1 so a mis-estimate '
         'lands under the target rather than over it.'),
     TricklerSetting(
