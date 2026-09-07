@@ -627,15 +627,19 @@ def main(config, memcache, args, pidtune_logger):
                     # Wait a second to dump powder and start trickling.
                     time.sleep(1)
                     logging.info('Starting powder dump...')
-                    servo_motor.run_servo()
-                    time.sleep(1.5)
-                    servo_motor.set_initial_angle()
-                    # Required since the larger powder drop hitting the cup may overshoot the weight until settling
-                    time.sleep(1)
-                    # Long enough for the servo to have got back to its initial angle, so
-                    # stop driving it. Holding a software-timed PWM signal on an idle
-                    # servo makes it buzz and hunt; the measure holds position itself.
-                    servo_motor.off()
+                    try:
+                        servo_motor.run_servo()
+                        time.sleep(1.5)
+                        servo_motor.set_initial_angle()
+                        # Required since the larger powder drop hitting the cup may overshoot the weight until settling
+                        time.sleep(1)
+                    finally:
+                        # Always, even if the dump failed: the servo holds its GPIO line
+                        # while it is driven, and a line still held after an error locks
+                        # the servo setup page out until this service restarts. Stopping
+                        # also keeps an idle servo from buzzing and hunting -- the measure
+                        # holds its own position.
+                        servo_motor.off()
                     logging.info('Completed powder dump.')
                 # Run trickler loop.
                 trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)

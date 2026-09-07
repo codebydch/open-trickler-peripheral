@@ -260,3 +260,51 @@ class FakeMemcache(dict):
 
     def delete(self, key):
         self.pop(key, None)
+
+
+class FakeLgpio:
+    """Stands in for the lgpio module, recording what the servo asked the hardware to do.
+
+    The pulse widths passed to tx_servo are the whole point: the servo's accuracy is the
+    microseconds it is sent, and the reason this project drives lgpio directly rather than
+    through gpiozero is that gpiozero's backend rounds them to 200 us steps.
+    """
+
+    class error(Exception):
+        """lgpio's own exception type, which is not an OSError."""
+
+    def __init__(self, busy=False):
+        # Set busy to have the line refuse to be claimed, as it does when another
+        # process is already holding it.
+        self.busy = busy
+        self.open_chips = []
+        self.claimed = []
+        self.pulses = []
+        self.freed = []
+        self.closed = []
+        self._next_handle = 100
+
+    def gpiochip_open(self, chip):
+        self._next_handle += 1
+        self.open_chips.append((chip, self._next_handle))
+        return self._next_handle
+
+    def gpio_claim_output(self, handle, gpio):
+        if self.busy:
+            raise self.error('GPIO busy')
+        self.claimed.append((handle, gpio))
+
+    def tx_servo(self, handle, gpio, pulse_width, *args, **kwargs):
+        self.pulses.append(pulse_width)
+
+    def gpio_free(self, handle, gpio):
+        self.freed.append((handle, gpio))
+
+    def gpiochip_close(self, handle):
+        self.closed.append(handle)
+
+    @property
+    def held_lines(self):
+        """Lines claimed on handles that have not been closed."""
+        return [(handle, gpio) for handle, gpio in self.claimed
+                if handle not in self.closed]

@@ -35,6 +35,9 @@ readonly APT_PACKAGES=(
   python3-dev
   python3-pip
   python3-venv
+  # The servo needs microsecond-accurate pulse widths, so it drives lgpio directly
+  # rather than going through gpiozero. See the GPIO note in the README.
+  python3-lgpio
 )
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
