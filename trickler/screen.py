@@ -19,6 +19,11 @@ from adafruit_rgb_display import st7789
 from pymemcache.client import base
 from decimal import Decimal
 
+
+# How often to check memcache for changes made elsewhere, in seconds.
+REFRESH_INTERVAL = 0.25
+
+
 class MiniPiTFTApp:
     def __init__(self, disp, button1_pin, button2_pin, font_path, colors, config, memcache_client, target_weight, auto_mode):
         self.constants = enum.Enum('memcache_vars', config['memcache_vars'])
@@ -40,6 +45,15 @@ class MiniPiTFTApp:
         self.set_memcache_value(self.constants.TARGET_WEIGHT.value, self.target_weight)
         self.set_memcache_value(self.constants.AUTO_MODE.value, self.auto_mode)
 
+        # Set when the trickler gives up on a jammed powder measure. Read from memcache
+        # in the run loop, like the two values above, since the trickler is what sets it.
+        self.dump_error = self.get_memcache_value(self.constants.DUMP_ERROR.value, '')
+
+        # Loaded once. update_display() used to re-parse the font file from the SD card
+        # on every redraw, and the loop below now redraws whenever anything changes.
+        self.font = ImageFont.truetype(self.font_path, 40)
+        self.alert_font = ImageFont.truetype(self.font_path, 20)
+
         self.digit_index = 0  # To track which digit is being edited
 
     def get_memcache_value(self, key, default):
@@ -57,8 +71,20 @@ class MiniPiTFTApp:
         image = Image.new('RGB', (self.disp.width, self.disp.height), self.colors['BLACK'])
         draw = ImageDraw.Draw(image)
         
+        # Whatever else is on the screen, say when the machine has stood down on a jam.
+        # Two short lines, because the panel is only 135px wide: at 20pt the widest of
+        # them measures 109px, while 'MEASURE JAMMED' on one line needs 188px. The full
+        # explanation stays on the control panel, which has room for a sentence.
+        if self.dump_error:
+            draw.rectangle((0, 0, self.disp.width, 52), fill=self.colors['RED'])
+            for line, line_y in (('MEASURE', 4), ('JAMMED', 28)):
+                line_bbox = draw.textbbox((0, 0), line, font=self.alert_font)
+                line_x = (self.disp.width - (line_bbox[2] - line_bbox[0])) // 2
+                draw.text((line_x, line_y), line, font=self.alert_font,
+                          fill=self.colors['WHITE'])
+
         # Draw the target weight
-        font = ImageFont.truetype(self.font_path, 40)
+        font = self.font
         text = f"{self.target_weight:05.2f}"
         text_bbox = draw.textbbox((0, 0), text, font=font)
         text_width = text_bbox[2] - text_bbox[0]
@@ -101,13 +127,62 @@ class MiniPiTFTApp:
     def toggle_auto_mode(self):
         self.auto_mode = not self.auto_mode
         self.set_memcache_value(self.constants.AUTO_MODE.value, self.auto_mode)
+        if self.auto_mode:
+            # Switching auto mode on is how you say a jam has been cleared -- the
+            # trickler switched it off itself when it gave up on the measure. Same rule
+            # as the control panel's toggle.
+            self.dump_error = ''
+            self.set_memcache_value(self.constants.DUMP_ERROR.value, '')
         self.update_display()
+
+    def refresh(self):
+        """Picks up changes made anywhere else, and reports whether anything moved.
+
+        The screen is not the only thing that writes these: the control panel sets the
+        target weight and toggles auto mode, and the trickler switches auto mode off by
+        itself when the powder measure jams. Without this the display would sit on
+        whatever the buttons last did, and the next both-button press would toggle from a
+        stale value -- taking two presses to turn auto mode back on after a jam.
+
+        Adopting is safe against the digit editor because every button press writes
+        straight to memcache. What this holds and what memcache holds only differ when
+        somebody else has written, which is exactly the case worth adopting.
+        """
+        changed = False
+
+        target = self.memcache_client.get(self.constants.TARGET_WEIGHT.value)
+        if target is None:
+            # memcached restarted and lost everything. Put back what we know rather than
+            # adopting nothing, the same way __init__ does.
+            self.set_memcache_value(self.constants.TARGET_WEIGHT.value, self.target_weight)
+        elif target != self.target_weight:
+            try:
+                # Anything that won't format would break update_display() on every pass.
+                self.target_weight = Decimal(str(target))
+                changed = True
+            except (ArithmeticError, TypeError, ValueError):
+                logging.warning('Ignoring an unusable target weight: %r', target)
+
+        auto_mode = self.memcache_client.get(self.constants.AUTO_MODE.value)
+        if auto_mode is None:
+            self.set_memcache_value(self.constants.AUTO_MODE.value, self.auto_mode)
+        elif bool(auto_mode) != self.auto_mode:
+            self.auto_mode = bool(auto_mode)
+            changed = True
+
+        dump_error = self.memcache_client.get(self.constants.DUMP_ERROR.value) or ''
+        if bool(dump_error) != bool(self.dump_error):
+            self.dump_error = dump_error
+            changed = True
+
+        return changed
 
     def shutdown_pi(self):
         os.system("/sbin/shutdown -h now")
 
     def run(self):
         self.update_display()
+        next_refresh = time.time()
         # Loop to update display with button presses
         while True:
             if self.button2.is_held:
@@ -122,6 +197,15 @@ class MiniPiTFTApp:
             elif self.button2.is_pressed:
                 self.move_to_next_digit()
                 time.sleep(0.1)  # Debounce delay
+
+            # Follow changes made from the control panel or by the trickler itself. On a
+            # timer, and only redrawing when something actually moved: a blind redraw
+            # every pass would push a full frame over SPI ten times a second for nothing.
+            if time.time() >= next_refresh:
+                next_refresh = time.time() + REFRESH_INTERVAL
+                if self.refresh():
+                    self.update_display()
+
             time.sleep(0.1)  # Sleep for a short period to avoid high CPU usage
 
 if __name__ == "__main__":

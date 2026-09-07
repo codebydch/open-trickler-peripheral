@@ -194,6 +194,10 @@ Run them on **Python 3.13** if you can, which is what Raspberry Pi OS Trixie shi
 passing run on an older interpreter is not proof: stacking `@classmethod` on `@property`
 worked until 3.13 removed it, and the scales module hit that on Trixie and nowhere else.
 
+The screen is covered too, by stubbing the two Pi-only modules `screen.py` imports and
+drawing into an in-memory image, so the digit editor and the jam banner are checked
+without hardware. Those tests skip themselves if Pillow or the DejaVu font is missing.
+
 `utilities/` holds standalone hardware tests for the servo, the display, and logging.
 `trickler/motors.py` and `trickler/scales.py` can each be run directly against a config
 file to exercise the hardware on its own.
