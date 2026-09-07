@@ -12,7 +12,12 @@ reachable at [http://opentrickler.local](http://opentrickler.local).
 1. You set a target weight — on the screen, or from the control panel in a browser — and
    turn auto mode on.
 2. When the pan is on the scale, settled, and under target, the servo trips the powder
-   measure for a coarse drop.
+   measure for a coarse drop. The drop is **weighed**: a kernel of powder caught in the
+   drum stops the measure dead, and a jam delivers nothing at all, so anything under
+   `stall_drop_weight` on the scale means it never cycled. The measure gets worked again
+   up to `max_dump_attempts` times, and if nothing ever comes out the machine stops --
+   auto mode off, with the reason on the control panel -- rather than asking the
+   tricklers to build the whole charge by vibration.
 3. Both tricklers run under PID control until the charge is within `fine_trickle_weight`
    of target, then trickler 2 shuts off and trickler 1 continues alone.
 4. Inside `pulse_trickle_weight`, continuous feeding stops for good and the **pulse
@@ -113,7 +118,9 @@ place. The sections worth knowing:
 - `[history]` — where charges are recorded (`/var/lib/opentrickler/charges.csv` by
   default, outside the repo so a `git pull` can't disturb it) and how many rows to keep.
 - `[profiles]` — the powder profile in use; each is a `[profile:Name]` section.
-- `[servo]` — powder measure travel and pulse widths, in **microseconds**.
+- `[servo]` — powder measure travel and pulse widths, in **microseconds**. Set
+  `servo_angle` from the servo page: work up until the measure gives a full drop, and
+  stop there rather than driving it into its stop.
 - `[PID]` — gains for the continuous phases only. The pulse feeder does not use the PID.
 
 **Tuning for accuracy:** `pulse_trickle_weight` must be comfortably larger than what a

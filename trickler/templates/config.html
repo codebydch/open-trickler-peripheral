@@ -56,6 +56,14 @@
       }
       .notice { background-color: #d4edda; color: #155724; }
       .warn { background-color: #fff3cd; color: #856404; }
+      .alarm {
+        background-color: #f8d7da;
+        color: #842029;
+        border-radius: 4px;
+        padding: 10px;
+        margin-bottom: 16px;
+        font-size: 15px;
+      }
       .field {
         border-top: 1px solid #e9ecef;
         padding: 12px 0;
@@ -148,6 +156,8 @@
         config file so they survive a reboot.
       </p>
 
+      <div class="alarm" id="jam" hidden></div>
+
       <div class="status">
         <div>Scale<span id="scale">&mdash;</span></div>
         <div>Target<span id="target">&mdash;</span></div>
@@ -237,6 +247,11 @@
             document.getElementById('auto').textContent = data.auto_mode ? 'ON' : 'OFF';
             document.getElementById('stable').textContent =
               data.scale_is_stable ? 'stable' : 'moving';
+            // The trickler switches auto mode off by itself when the measure jams, so
+            // without this the only symptom is auto mode going quiet on its own.
+            var jam = document.getElementById('jam');
+            jam.textContent = data.dump_error || '';
+            jam.hidden = !data.dump_error;
           })
           .catch(function () {});
       }

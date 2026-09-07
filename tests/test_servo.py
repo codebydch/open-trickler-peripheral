@@ -122,7 +122,9 @@ class MovementTest(ServoTestCase):
         self.servo.off()
         self.servo.run_servo()
         self.assertEqual(len(self.lgpio.held_lines), 1)
-        self.assertEqual(self.lgpio.pulses[-1], round(self.servo.pulse_width(92)))
+        self.assertEqual(
+            self.lgpio.pulses[-1],
+            round(self.servo.pulse_width(float(self.config['servo']['servo_angle']))))
 
     def test_moving_twice_claims_the_line_once(self):
         self.servo.run_servo()

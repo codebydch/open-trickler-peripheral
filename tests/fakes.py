@@ -308,3 +308,36 @@ class FakeLgpio:
         """Lines claimed on handles that have not been closed."""
         return [(handle, gpio) for handle, gpio in self.claimed
                 if handle not in self.closed]
+
+
+class SimulatedMeasure:
+    """A powder measure worked by the servo, which can jam.
+
+    Stands in for motors.ServoMotor in the dump. A jam is all-or-nothing on this
+    machine: a kernel caught in the drum stops the handle dead and the servo cannot
+    shear it, so a jammed cycle delivers nothing at all rather than a short charge.
+
+    `jams` is how many attempts jam before one works; None means it never clears.
+    """
+
+    def __init__(self, machine, drop=25.0, jams=0):
+        self.machine = machine
+        self.drop = D(str(drop))
+        self.jams = jams
+        self.cycles = 0
+        self.released = 0
+
+    def run_servo(self):
+        self.cycles += 1
+        if self.jams is None or self.cycles <= self.jams:
+            return
+        self.machine.true_weight += self.drop
+
+    def set_initial_angle(self):
+        pass
+
+    def off(self):
+        self.released += 1
+
+    def stop(self):
+        self.off()
