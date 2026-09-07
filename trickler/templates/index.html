@@ -77,11 +77,23 @@
       .toggle-button:hover {
         background-color: #5a6268;
       }
+      .alarm {
+        background-color: #f8d7da;
+        color: #842029;
+        border-radius: 4px;
+        padding: 10px;
+        margin-bottom: 16px;
+        font-size: 15px;
+        text-align: left;
+      }
     </style>
   </head>
   <body>
     <div class="container">
       <h1>OpenTrickler Control Panel</h1>
+      {% if dump_error %}
+        <p class="alarm">{{ dump_error }}</p>
+      {% endif %}
       <p>Target Weight: {{ target_weight }}</p>
       <p>Trickler Status: 
         <span class="status-box {{ 'status-on' if auto_mode else 'status-off' }}">

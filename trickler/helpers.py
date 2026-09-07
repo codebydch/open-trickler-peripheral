@@ -163,6 +163,18 @@ TRICKLER_SETTINGS = (
         'lookahead_time', 'Look ahead', '0.35', 0.0, 2.0, 0.05,
         'Seconds. How far ahead to project the feed rate when deciding to slow down. '
         'Covers powder in flight plus the scale\'s reporting lag.'),
+    TricklerSetting(
+        'stall_drop_weight', 'Measure jammed under', '0.5', 0.0, 20.0, 0.1,
+        'Grains. Less than this on the scale after a dump means the measure never '
+        'cycled -- a kernel caught in the drum stops it dead, so a jam weighs nothing. '
+        'Set to 0 to stop checking.'),
+    TricklerSetting(
+        'max_dump_attempts', 'Dump attempts', '3', 1.0, 10.0, 1.0,
+        'How many times to work the measure before giving up on a jam. Each attempt '
+        'holds the servo against the jam, so more is not automatically better.'),
+    TricklerSetting(
+        'dump_retry_pause', 'Pause between attempts', '1.0', 0.0, 10.0, 0.5,
+        'Seconds with the arm returned and the handle unloaded, before pushing again.'),
 )
 
 

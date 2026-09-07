@@ -250,14 +250,17 @@ def status():
         auto_mode=bool(safe_get(constants.AUTO_MODE.value, False)),
         motor_speed=None if speed is None else round(float(speed), 3),
         pulse_rate=None if rate is None else round(float(rate), 4),
-        profile=active_profile())
+        profile=active_profile(),
+        # Set when the trickler stopped because the powder measure dropped nothing.
+        dump_error=safe_get(constants.DUMP_ERROR.value, '') or '')
 
 
 @app.route('/app/')
 def index():
     target_weight = get_memcache_value('target_weight', Decimal('0.00'))
     auto_mode = get_memcache_value('auto_mode', False)
-    return render_template('index.html', target_weight=target_weight, auto_mode=auto_mode)
+    return render_template('index.html', target_weight=target_weight, auto_mode=auto_mode,
+                           dump_error=safe_get(constants.DUMP_ERROR.value, '') or '')
 
 @app.route('/app/update', methods=['POST'])
 def update():
@@ -271,6 +274,10 @@ def update():
     elif 'toggle' in request.form:
         auto_mode = not get_memcache_value('auto_mode', False)
         set_memcache_value('auto_mode', auto_mode)
+        if auto_mode:
+            # Switching auto mode back on is how you say the jam is cleared -- the
+            # trickler switched it off itself when it gave up on the measure.
+            set_memcache_value(constants.DUMP_ERROR.value, '')
     return redirect(url_for('index'))
 
 if __name__ == '__main__':

@@ -79,6 +79,9 @@ TricklerSettings = collections.namedtuple('TricklerSettings', (
     'cutoff_weight',
     'rate_window',
     'lookahead_time',
+    'stall_drop_weight',
+    'max_dump_attempts',
+    'dump_retry_pause',
     'profile',
     'history_path',
     'history_max_rows',
@@ -112,6 +115,26 @@ class FeedRateEstimator:
         if elapsed <= 0:
             return decimal.Decimal('0')
         return max(decimal.Decimal('0'), (new_weight - old_weight) / elapsed)
+
+
+def settled_weight(scale, timeout, min_wait=0.0):
+    """Reads the scale until it reports a stable weight, or `timeout` seconds pass.
+
+    `min_wait` is the time that must pass before a stable reading is believed. It
+    matters more than it looks: for the first moment after powder is fed, it is still in
+    the air, so the pan is undisturbed and the scale happily reports the *old* weight as
+    stable. Trusting that reads the feed as having delivered nothing, and the one after
+    it as having delivered double.
+    """
+    start = time.time()
+    deadline = start + timeout
+    while time.time() < deadline:
+        scale.update()
+        if time.time() - start < min_wait:
+            continue
+        if getattr(scale, 'is_fresh', True) and scale.is_stable:
+            break
+    return scale.weight
 
 
 class PulseFeeder:
@@ -165,23 +188,8 @@ class PulseFeeder:
         return remainder <= max(self.min_dose / 2, self._settings.cutoff_weight)
 
     def settled_weight(self, min_wait=0.0):
-        """Reads the scale until it reports a stable weight, or the settle time runs out.
-
-        `min_wait` is the time that must pass before a stable reading is believed. It
-        matters more than it looks: for the first moment after a pulse the powder is
-        still in the air, so the pan is undisturbed and the scale happily reports the
-        *old* weight as stable. Trusting that reads the pulse as having delivered
-        nothing, and the one after it as having delivered double.
-        """
-        start = time.time()
-        deadline = start + self._settings.settle_timeout
-        while time.time() < deadline:
-            self._scale.update()
-            if time.time() - start < min_wait:
-                continue
-            if getattr(self._scale, 'is_fresh', True) and self._scale.is_stable:
-                break
-        return self._scale.weight
+        """The settled scale reading, using this feeder's configured settle times."""
+        return settled_weight(self._scale, self._settings.settle_timeout, min_wait)
 
     def feed(self, remainder):
         """Fires one pulse aimed at part of `remainder`, returning what it actually delivered."""
@@ -340,9 +348,83 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
         cutoff_weight=decimal.Decimal(section['cutoff_weight']) * factor,
         rate_window=int(section['rate_window']),
         lookahead_time=decimal.Decimal(section['lookahead_time']),
+        stall_drop_weight=decimal.Decimal(section['stall_drop_weight']) * factor,
+        max_dump_attempts=int(float(section['max_dump_attempts'])),
+        dump_retry_pause=float(section['dump_retry_pause']),
         profile=profile,
         history_path=history.get('path', '') if history.getboolean('enabled', True) else '',
         history_max_rows=history.getint('max_rows', 500))
+
+
+def dump_powder(servo_motor, scale, settings):
+    """Runs the powder measure once, and reports how much powder actually landed.
+
+    Returns (dropped, attempts). The servo is released whatever happens: it holds its
+    GPIO line while it is being driven, and a line still held after an error locks the
+    servo setup page out until this service restarts.
+
+    A jammed measure drops *nothing*. A kernel of powder caught in the drum stops the
+    handle dead, and the servo is not strong enough to shear it, so there is no partial
+    drop to reason about -- which is why the check is a fixed floor rather than something
+    learned from previous charges. When it happens, back the arm off to unload the
+    handle, wait, and push again: that motion is also the one most likely to shift the
+    kernel. `stall_drop_weight` of 0 turns the whole check off.
+    """
+    attempts = 0
+    dropped = decimal.Decimal('0')
+    before = settled_weight(scale, settings.settle_timeout, settings.settle_min_time)
+
+    while attempts < max(1, settings.max_dump_attempts):
+        if attempts:
+            logging.warning(
+                'The measure dropped nothing (%s). Working it again, attempt %s of %s.',
+                dropped, attempts + 1, settings.max_dump_attempts)
+            time.sleep(settings.dump_retry_pause)
+        attempts += 1
+        try:
+            servo_motor.run_servo()
+            time.sleep(1.5)
+            servo_motor.set_initial_angle()
+            # The drop hitting the pan overshoots until it settles, so let it.
+            time.sleep(1)
+        finally:
+            servo_motor.off()
+
+        dropped = settled_weight(
+            scale, settings.settle_timeout, settings.settle_min_time) - before
+        if settings.stall_drop_weight <= 0 or dropped >= settings.stall_drop_weight:
+            break
+
+    return dropped, attempts
+
+
+def dump_or_stop(servo_motor, scale, settings, memcache, constants, tricklers):
+    """Dumps a charge, and stops the machine if the measure turns out to be jammed.
+
+    Returns True if there is powder in the pan and the charge may go on.
+
+    Stopping means auto mode off, both tricklers off, and the reason where a person will
+    see it. Auto mode matters most: without it the next pass through the control loop
+    would drive the servo straight back into the same jam, forever. The alternative --
+    carrying on -- means handing an empty pan to the trickler loop, which would try to
+    build the entire charge with the vibratory motors.
+    """
+    logging.info('Starting powder dump...')
+    dropped, attempts = dump_powder(servo_motor, scale, settings)
+    if settings.stall_drop_weight > 0 and dropped < settings.stall_drop_weight:
+        message = (
+            'The powder measure dropped nothing in %s attempt(s) -- it is probably '
+            'jammed on a kernel. Clear it, then turn auto mode back on.' % attempts)
+        logging.error(message)
+        for motor in tricklers:
+            motor.off()
+        memcache.set(constants.DUMP_ERROR.value, message)
+        memcache.set(constants.AUTO_MODE.value, False)
+        return False
+
+    memcache.set(constants.DUMP_ERROR.value, '')
+    logging.info('Completed powder dump: %s in %s attempt(s).', dropped, attempts)
+    return True
 
 
 def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
@@ -622,25 +704,15 @@ def main(config, memcache, args, pidtune_logger):
             # service down with it, and the restart wipes the log context along with the
             # settings, which makes the original error very hard to find.
             try:
+                settings = trickler_settings(config, memcache, constants, scale, target_unit)
                 # Stops the servo from dumping powder twice if the scale weight dips below the target weight
                 if ((target_weight - scale.weight) / target_weight) >= 0.5:
                     # Wait a second to dump powder and start trickling.
                     time.sleep(1)
-                    logging.info('Starting powder dump...')
-                    try:
-                        servo_motor.run_servo()
-                        time.sleep(1.5)
-                        servo_motor.set_initial_angle()
-                        # Required since the larger powder drop hitting the cup may overshoot the weight until settling
-                        time.sleep(1)
-                    finally:
-                        # Always, even if the dump failed: the servo holds its GPIO line
-                        # while it is driven, and a line still held after an error locks
-                        # the servo setup page out until this service restarts. Stopping
-                        # also keeps an idle servo from buzzing and hunting -- the measure
-                        # holds its own position.
-                        servo_motor.off()
-                    logging.info('Completed powder dump.')
+                    if not dump_or_stop(servo_motor, scale, settings, memcache,
+                                        constants,
+                                        (trickler_motor1, trickler_motor2)):
+                        continue
                 # Run trickler loop.
                 trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)
             except Exception:
