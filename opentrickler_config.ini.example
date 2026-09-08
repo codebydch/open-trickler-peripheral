@@ -101,10 +101,13 @@ pulse_aim = 0.85
 # How long to wait for the scale to report a stable reading after a pulse, in seconds,
 # before giving up and using whatever it last reported.
 settle_timeout = 1.0
-# Stop this far short of the target weight. The pulse feeder already stops when the
-# next pulse would overshoot by more than stopping short does, so this is a floor
-# under that, not the main brake. Lower it toward 0 once pulse learning is dialed in.
-cutoff_weight = 0.01
+# Stop this far short of the target weight. On a scale reading in 0.02 gn steps this
+# only ever decides one thing: whether a remainder of exactly one division is accepted
+# or another pulse is fired at it. Anything below a division means the same as 0.
+# At one division every charge lands one grain light, which is trickled up in seconds.
+# Below it charges land on target but occasionally one grain heavy, which means dumping
+# the pan. Only go lower if your scale resolves finer than the powder you are throwing.
+cutoff_weight = 0.02
 # Number of scale readings averaged when working out how fast powder is landing
 # during the continuous phases. The loop reads far faster than the scale updates, and
 # powder lands in lumps, so too short a window measures the scale's 0.02 gn step rather

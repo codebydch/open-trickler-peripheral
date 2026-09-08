@@ -140,6 +140,9 @@ STALL_PWM = 0.20        # below this the vibratory motor moves no powder
 # a long time, and a simulator that starts feeding almost instantly cannot show the thing
 # that dominates a short pulse on the real machine.
 SPIN_UP = 0.12
+# How far the heaviest grain runs over the nominal one, as a multiplier. Stick powder is
+# cut, not milled, so grains vary either side of the average by about a quarter.
+GRAIN_SPREAD = D('1.25')
 
 
 class VibratoryMotor:
@@ -224,12 +227,22 @@ class SimulatedMachine:
         self.port.on_timeout = lambda: self.tick(0.1)
         self._emit()
 
+    @property
+    def largest_grain(self):
+        """The heaviest single grain this machine can drop.
+
+        What a charge can overshoot by: the feeder stops as soon as the reading reaches
+        the target, so the last grain to land is the last thing that can push it over.
+        """
+        return self.kernel * GRAIN_SPREAD
+
     def _grain_weight(self):
         """One grain of powder. Not all the same: stick powder is cut, not milled, so
         grains vary by a quarter either way. A simulator where every grain weighs exactly
         one scale division lets a charge land dead on target every time, which flatters
         the code and teaches nothing."""
-        return self.kernel * D(str(round(self._random.uniform(0.75, 1.25), 4)))
+        return self.kernel * D(str(
+            round(self._random.uniform(float(2 - GRAIN_SPREAD), float(GRAIN_SPREAD)), 4)))
 
     def _deliver(self, weight):
         """Turns continuous flow into whole grains landing in the pan.

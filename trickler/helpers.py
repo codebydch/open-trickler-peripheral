@@ -172,9 +172,11 @@ TRICKLER_SETTINGS = (
         'settle_timeout', 'Settle timeout', '1.0', 0.1, 10.0, 0.1,
         'Seconds to wait for the scale to report stable before using whatever it last said.'),
     TricklerSetting(
-        'cutoff_weight', 'Stop short by', '0.01', 0.0, 1.0, 0.01,
-        'Grains. A floor under the feeder\'s own stopping rule. Raise it if charges still '
-        'run heavy, lower it toward 0 if they run light.'),
+        'cutoff_weight', 'Stop short by', '0.02', 0.0, 1.0, 0.01,
+        'Grains. A floor under the feeder\'s own stopping rule. Since the scale reads in '
+        'steps, this really chooses between stopping one step light every time and '
+        'landing on target but sometimes one step heavy. A light charge is trickled up; '
+        'a heavy one has to be dumped.'),
     TricklerSetting(
         'rate_window', 'Feed rate samples', '12', 2.0, 20.0, 1.0,
         'Scale readings averaged when judging how fast powder is landing during the '
