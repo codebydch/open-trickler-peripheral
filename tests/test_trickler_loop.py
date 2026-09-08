@@ -45,15 +45,22 @@ def run_charge(machine, target, config=None, memcache=None, pid=None):
 
 
 class ChargeAccuracyTest(unittest.TestCase):
-    """What the whole exercise was for."""
+    """What the whole exercise was for.
 
-    def test_lands_within_a_scale_division(self):
+    The bound is one grain, not zero. Powder arrives in whole grains of about 0.02 gn,
+    which is also one division of the scale, so a charge can land on the target or one
+    grain either side of it and there is no third option. Asking for better is asking the
+    machine to split a grain of Varget.
+    """
+
+    def test_lands_within_one_grain(self):
         for start in ('43.80', '44.50', '44.90'):
             with self.subTest(start=start):
                 machine = fakes.SimulatedMachine(start)
                 run_charge(machine, D('45.00'))
                 error = machine.true_weight - D('45.00')
-                self.assertLess(abs(error), D('0.02'), 'landed %s off target' % error)
+                self.assertLessEqual(abs(error), machine.kernel,
+                                     'landed %s off target' % error)
 
     def test_never_overshoots_badly_across_trickler_speeds(self):
         """A faster trickler must not blow past the target."""
@@ -73,7 +80,8 @@ class ChargeAccuracyTest(unittest.TestCase):
             run_charge(machine, D('45.00'), config=fakes.load_config(pulse_rate=seed))
             errors.append(machine.true_weight - D('45.00'))
         for error in errors:
-            self.assertLess(abs(error), D('0.02'), 'seed changed the outcome: %s' % errors)
+            self.assertLessEqual(abs(error), D('0.02'),
+                                 'seed changed the outcome: %s' % errors)
 
 
 class ExitPathTest(unittest.TestCase):
@@ -184,6 +192,111 @@ class SeedMemcacheTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class GranularDeliveryTest(unittest.TestCase):
+    """Powder arrives as whole grains, and the feeder has to reason in whole grains.
+
+    Every dose ever measured on the machine was a multiple of 0.02 gn -- 0.00, 0.02,
+    0.04, 0.06, never 0.01 or 0.03 -- because one grain of stick powder and one division
+    of the scale are both about that. Treating delivery as a smooth fluid, which the
+    simulator used to do, hid every defect in this class.
+    """
+
+    def feeder(self, scale=None, **overrides):
+        config = fakes.load_config(**overrides)
+        if scale is None:
+            scale = mock.Mock()
+            scale.Units = scales.ANDScale.Units
+            scale.resolution = D('0.02')
+        settings = main.trickler_settings(
+            config, None, None, scale, scales.ANDScale.Units.GRAINS)
+        return main.PulseFeeder(mock.Mock(), scale, settings)
+
+    def feed_window(self, feeder, doses, on_time=0.2):
+        """Pushes a sequence of measured doses through the learner."""
+        feeder._rate_measured = True
+        for dose in doses:
+            feeder._learn(on_time, D(str(dose)))
+
+    def test_the_rate_converges_on_what_was_really_delivered(self):
+        """Judging each pulse alone and dropping the ones that read zero keeps the hits
+        and discards the misses. On the bench that read 0.111 gn/s when the truth was
+        nearer 0.036 -- and every pulse sized from it ran three times too long.
+
+        Two grains per six pulses of 0.18 s moving time is 0.037 gn/s. Counting only the
+        two pulses that delivered would say 0.111, three times too fast.
+        """
+        feeder = self.feeder()
+        for _ in range(5):
+            self.feed_window(feeder, [0, 0.02, 0, 0, 0.02, 0])
+        self.assertAlmostEqual(feeder.rate, 0.037, delta=0.005)
+
+    def test_the_rate_never_reads_like_the_hits_alone(self):
+        """Even one window in, it must not be anywhere near the biased figure."""
+        feeder = self.feeder()
+        self.feed_window(feeder, [0, 0.02, 0, 0, 0.02, 0])
+        self.assertLess(feeder.rate, 0.111,
+                        'this is the biased estimate the bench was suffering from')
+
+    def test_a_clump_does_not_send_the_estimate_flying(self):
+        """One pulse dropping three grains is ordinary; it is not a threefold rate."""
+        feeder = self.feeder()
+        self.feed_window(feeder, [0.02, 0.02, 0.02, 0.02, 0.02, 0.06])
+        self.assertLess(feeder.rate, 0.15)
+
+    def test_grainless_pulses_do_not_look_like_an_empty_hopper(self):
+        """The bug that abandoned three charges in four: a couple of pulses without a
+        grain is powder teetering on the lip, not an empty tube."""
+        feeder = self.feeder()
+        self.feed_window(feeder, [0.02, 0, 0, 0, 0.02, 0, 0])
+        self.assertLess(feeder.empty_pulses, main.MAX_EMPTY_PULSES)
+
+    def test_a_genuinely_empty_hopper_still_gives_up(self):
+        feeder = self.feeder()
+        self.feed_window(feeder, [0] * (main.MAX_EMPTY_PULSES + 2))
+        self.assertGreaterEqual(feeder.empty_pulses, main.MAX_EMPTY_PULSES)
+
+    def test_the_bench_sequence_does_not_abandon_the_charge(self):
+        """Replayed from the log of 2026-09-07 22:14, where the feeder gave up at 0.04 gn
+        to go and the very next pulse after restarting finished the charge."""
+        feeder = self.feeder()
+        self.feed_window(
+            feeder,
+            [0, 0.02, 0, 0.02, 0, 0, 0.02, 0, 0, 0, 0, 0, 0.02, 0, 0.02, 0, 0, 0, 0, 0])
+        self.assertLess(feeder.empty_pulses, main.MAX_EMPTY_PULSES,
+                        'this is the sequence that used to be read as an empty hopper')
+
+    def test_nothing_finer_than_one_grain_can_be_placed(self):
+        """min_dose was reporting 0.0144 gn -- less than a grain of Varget."""
+        feeder = self.feeder(pulse_rate=0.05, pulse_min_on_time=0.03)
+        self.assertGreaterEqual(feeder.min_dose, D('0.02'))
+
+    def test_the_charge_stops_within_one_grain(self):
+        """Chasing half a division is chasing something the scale cannot show, which is
+        what fired eight fruitless pulses in a row."""
+        feeder = self.feeder(cutoff_weight=0.001)
+        self.assertTrue(feeder.done(D('0.01')))
+
+    def test_the_endgame_places_one_grain_at_a_time(self):
+        """Aiming for 0.7 x 0.04 = 0.028 gn is arithmetic about a dose that cannot
+        exist. Below a few grains the feeder should just place one and look."""
+        feeder = self.feeder()
+        feeder._rate_measured = True
+        feeder._rate = 0.2
+        # One grain at 0.2 gn/s is 0.1 s of movement, plus the spin-up.
+        self.assertAlmostEqual(feeder._one_grain_time(), 0.12, places=3)
+        self.assertTrue(feeder._in_the_last_grains(D('0.08')))
+        self.assertFalse(feeder._in_the_last_grains(D('0.30')))
+
+    def test_the_shortest_pulse_is_not_used_as_the_endgame_pulse(self):
+        """On a slow trickler the shortest pulse the machine can fire delivers nothing at
+        all -- thirty of them in a row was the 77-second crawl on the bench."""
+        feeder = self.feeder(pulse_min_on_time=0.03)
+        feeder._rate_measured = True
+        feeder._rate = 0.05
+        self.assertGreater(feeder._one_grain_time(),
+                           feeder.settings.pulse_min_on_time * 3)
 
 
 class PulseSpeedTest(unittest.TestCase):

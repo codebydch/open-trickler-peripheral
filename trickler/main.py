@@ -60,8 +60,19 @@ MAX_EMPTY_PULSES = 8
 # guessed rate says would fill the gap. See PulseFeeder._probe_time.
 FAST_PROBE_PULSES = 4
 FAST_PROBE_SAFETY = 4
-# How far a probe may be lengthened when its dose lands under the scale's resolution.
+# How far a probe may distrust the rate it was sized from, when probe after probe comes
+# back with nothing measurable. Bounded so a probe can never spoil a charge.
 MAX_FAST_PROBE = 8
+
+# How many recent pulses the feed rate is measured over. Long enough that whole grains
+# landing at random average out, short enough to follow a hopper that is emptying.
+RATE_WINDOW_PULSES = 6
+
+# How many scale divisions from target the feeder stops sizing pulses and just places one
+# grain at a time. Aiming below this is arithmetic about doses the machine cannot deliver.
+# Measured across 45 simulated charges spanning a 60x range of seed rates: at 5 divisions
+# nothing landed more than one grain over, while 3 and 8 both produced charges that did.
+FINAL_GRAINS = 5
 
 # Backstop on the final approach. Even with the give-up counters above, a pathological
 # cycle should not wedge the daemon on one charge.
@@ -196,7 +207,18 @@ class PulseFeeder:
         # How many minimum-length pulses the next fast probe runs for. Doubles whenever a
         # probe lands under the scale's resolution, since a dose that reads as zero
         # measures nothing.
-        self._fast_probe = 1
+        # How far the guessed rate is discounted when sizing a probe. Doubles every time
+        # a probe delivers too little to measure, because that is evidence the guess is
+        # too high -- and a probe sized from a rate several times too high is far too
+        # short to ever deliver anything.
+        self._probe_scale = {False: 1.0, True: 1.0}
+        # Recent pulses at each speed, as (on_time, dose). The rate is measured over the
+        # whole window rather than pulse by pulse: powder arrives as whole grains, so an
+        # individual dose is 0, one grain, or three, and none of those is the feed rate.
+        # Summing the window lets the zeros and the clumps cancel, which is the only
+        # unbiased way to measure a granular process.
+        self._window = {False: collections.deque(maxlen=RATE_WINDOW_PULSES),
+                        True: collections.deque(maxlen=RATE_WINDOW_PULSES)}
 
     @property
     def settings(self):
@@ -230,14 +252,36 @@ class PulseFeeder:
         return on_time - self._settings.pulse_dead_time
 
     @property
+    def resolution(self):
+        """The smallest weight change this scale can report.
+
+        Also, in practice, about the weight of one grain of stick powder -- the two are
+        both near 0.02 gn and every dose this machine has ever measured was a multiple of
+        it. Nothing finer can be placed *or* seen, so it is the floor under every
+        judgement the feeder makes.
+        """
+        try:
+            return decimal.Decimal(getattr(self._scale, 'resolution', 0))
+        except (TypeError, ValueError, decimal.InvalidOperation):
+            # A scale class that doesn't report one behaves as it did before this.
+            return decimal.Decimal(0)
+
+    @property
     def min_dose(self):
-        """Smallest amount of powder a single pulse can deliver."""
-        return decimal.Decimal(str(
+        """Smallest amount of powder a single pulse can deliver.
+
+        Never less than one division: the machine cannot place half a grain, and letting
+        this go below what the scale can resolve is what had it firing pulse after pulse
+        at a target it could not measure.
+        """
+        computed = decimal.Decimal(str(
             self._rate * max(self._moving_time(self._settings.pulse_min_on_time), 0.0)))
+        return max(computed, self.resolution)
 
     def done(self, remainder):
         """True once another pulse would miss the target by more than stopping short does."""
-        return remainder <= max(self.min_dose / 2, self._settings.cutoff_weight)
+        return remainder <= max(self.min_dose / 2, self._settings.cutoff_weight,
+                                self.resolution / 2)
 
     def settled_weight(self, min_wait=0.0):
         """The settled scale reading, using this feeder's configured settle times."""
@@ -254,7 +298,14 @@ class PulseFeeder:
         """
         fast = self._use_fast_speed(remainder)
         if not self._measured(fast):
+            # Nothing weighed at this speed yet, so there is no rate to size anything
+            # from -- not an aimed dose and not a single grain either.
             on_time = self._probe_time(remainder, fast)
+        elif self._in_the_last_grains(remainder):
+            # Close enough that aiming is meaningless: asking for 0.028 gn when powder
+            # arrives in 0.02 gn grains gets you 0, 0.02 or 0.06 whatever the pulse
+            # length. Place one grain and weigh the result.
+            on_time = self._one_grain_time()
         else:
             # Aim short of what's left so a mis-estimate lands under the target rather
             # than over it. The next pulse closes whatever remains.
@@ -307,14 +358,35 @@ class PulseFeeder:
         """
         settings = self._settings
         dead = settings.pulse_dead_time
-        absolute = dead + settings.pulse_min_on_time * FAST_PROBE_PULSES * self._fast_probe
+        scale = self._probe_scale[bool(fast)]
+        absolute = dead + settings.pulse_min_on_time * FAST_PROBE_PULSES * scale
         gap = float(remainder - settings.pulse_fast_until) if fast else float(remainder)
-        guess = self.fast_rate if fast else self._rate
+        # Discount the guess by however many times a probe has already come back
+        # unmeasurable. Both bounds lengthen together: raising only the absolute one
+        # leaves this bound binding at the same short pulse forever, which is how a slow
+        # trickler fired eight probes that each delivered nothing.
+        guess = (self.fast_rate if fast else self._rate) / scale
         against_gap = (dead + gap / (guess * FAST_PROBE_SAFETY)) if guess > 0 else absolute
         # Never shorter than the spin-up plus one minimum pulse: a probe that delivers
         # nothing measures nothing.
         floor = dead + settings.pulse_min_on_time
         return max(min(absolute, against_gap, settings.pulse_on_time), floor)
+
+    def _one_grain_time(self):
+        """How long to run to deliver about one grain, at the rate measured so far.
+
+        Not `pulse_min_on_time`: the shortest pulse the machine can fire is not the same
+        as the shortest pulse that moves powder, and on a slow trickler it delivers
+        nothing at all -- which is the crawl of thirty fruitless pulses seen on the bench.
+        Sizing it from the measured rate adapts to the machine instead of assuming one.
+        """
+        if self._rate <= 0:
+            return self._settings.pulse_min_on_time
+        return float(self.resolution) / self._rate + self._settings.pulse_dead_time
+
+    def _in_the_last_grains(self, remainder):
+        """True once what is left is only a few grains of powder."""
+        return self.resolution > 0 and remainder <= self.resolution * FINAL_GRAINS
 
     def _use_fast_speed(self, remainder):
         """True while there is enough left to be worth a coarse pulse."""
@@ -327,54 +399,59 @@ class PulseFeeder:
         return min(max(pwm, self._settings.stall_pwm), 100.0) / 100
 
     def _learn(self, on_time, dose, fast=False):
-        """Folds one measured pulse into the feed-rate estimate for the speed it used."""
+        """Folds one measured pulse into the feed-rate estimate for the speed it used.
+
+        Measured over a window of recent pulses rather than one at a time. Powder lands as
+        whole grains, so a single dose is 0, one grain, or occasionally three -- none of
+        which is the feed rate. Worse, judging each pulse alone and discarding the ones
+        that read zero keeps only the hits and throws away the misses, which overestimated
+        the rate by three times on the bench and made every pulse sized from it too long.
+        Summing weight and time across the window lets the zeros and the clumps cancel.
+        """
         if dose < 0:
-            # Pan knocked, or the scale drifted down. The rate estimate can't learn
-            # anything from it, but it still counts as a pulse that got us no closer --
-            # otherwise a run of them loops here forever.
+            # Pan knocked, or the scale drifted down. Nothing to learn, but it still
+            # counts as a pulse that got us no closer -- otherwise a run of them loops
+            # here forever.
             logging.debug('Ignoring negative pulse dose: %r', dose)
             self.empty_pulses += 1
             return
-        self.empty_pulses = 0 if dose > 0 else self.empty_pulses + 1
-
-        # A dose smaller than the scale can resolve carries no information: it reads as
-        # zero whether it was zero or most of a division. Learning from it drags the rate
-        # down towards nothing, and the estimate stops describing the machine. The short
-        # pulses at the very end of a charge are all like this.
-        try:
-            resolution = decimal.Decimal(getattr(self._scale, 'resolution', 0))
-        except (TypeError, ValueError, decimal.InvalidOperation):
-            # A scale class that doesn't report a resolution just learns from everything,
-            # as it did before this guard existed.
-            resolution = decimal.Decimal(0)
-        if dose < resolution:
-            logging.debug('Pulse dose %r is below the scale resolution %r; not learning '
-                          'from it.', dose, resolution)
-            if not self._measured(fast):
-                # The probe was too short to read. Lengthen the next one rather than
-                # probing at the same length forever.
-                self._fast_probe = min(self._fast_probe * 2, MAX_FAST_PROBE)
-            return
 
         moving = self._moving_time(on_time)
-        if moving <= 0:
-            logging.debug('Pulse of %rs was all spin-up; nothing to learn from.', on_time)
+        window = self._window[bool(fast)]
+        if moving > 0:
+            window.append((moving, float(dose)))
+
+        delivered = sum(pulse_dose for _, pulse_dose in window)
+        elapsed = sum(pulse_time for pulse_time, _ in window)
+        # A pulse only counts as unproductive if the whole window has delivered nothing.
+        # A few grainless pulses in a row is ordinary -- powder teeters on the lip and
+        # falls on a later pulse -- and treating each one as evidence of an empty hopper
+        # abandoned three charges in four on the bench, seconds before they finished.
+        self.empty_pulses = 0 if delivered > 0 else self.empty_pulses + 1
+
+        if delivered < float(self.resolution) or elapsed <= 0:
+            logging.debug('Window has delivered %r over %rs, less than the scale can '
+                          'resolve; not learning from it yet.', delivered, elapsed)
+            if not self._measured(fast):
+                # The probe was too short to read, so the rate it was sized from is too
+                # high. Distrust it further and probe for longer, rather than firing the
+                # same fruitless pulse over and over.
+                self._probe_scale[bool(fast)] = min(
+                    self._probe_scale[bool(fast)] * 2, MAX_FAST_PROBE)
             return
-        observed = float(dose) / moving
-        # Each speed has its own estimate. Folding a fast pulse into the slow rate would
-        # make the fine pulses at the end of a charge far too long.
+
+        observed = delivered / elapsed
+        # Each speed has its own estimate. Folding a fast pulse into the fine rate would
+        # make the pulses that finish the charge far too long.
         if not self._measured(fast):
             # The first real measurement at a speed replaces its guess outright. Easing
             # towards it from a guess that could be several times out would leave the
             # next pulse sized on a number nothing has ever measured.
             updated = max(observed, MIN_PULSE_RATE)
-            self._fast_probe = 1
+            self._probe_scale[bool(fast)] = 1.0
         else:
             current = self.fast_rate if fast else self._rate
             updated = max(current + (observed - current) * PULSE_RATE_LEARN, MIN_PULSE_RATE)
-        logging.debug(
-            'pulse on_time: %r dose: %r at %s speed -> rate: %r (min dose %r)',
-            on_time, dose, 'fast' if fast else 'fine', updated, self.min_dose)
         if fast:
             self._fast_rate = updated
             key = self._fast_rate_key
@@ -624,9 +701,15 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
 
         on_time, dose = feeder.feed(remainder)
         weight = scale.weight
+        # Every pulse, at INFO, including the ones that delivered nothing and taught
+        # nothing: this line is the only view of the final approach anyone has, and it
+        # used to record what the feeder learned rather than what it did -- so the pulses
+        # worth looking at were exactly the ones missing from it. The rate is here too,
+        # since a rate drifting away from reality is what a bad charge looks like before
+        # it goes wrong.
         logging.info(
-            'remainder: %s %s scale: %s %s pulsed %.3fs -> %s',
-            remainder, target_unit, weight, scale.unit, on_time, dose)
+            'remainder: %s %s scale: %s %s pulsed %.3fs -> %s (rate %.3f/s)',
+            remainder, target_unit, weight, scale.unit, on_time, dose, feeder.rate)
 
 
 def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger):
@@ -877,7 +960,10 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run OpenTrickler.')
     parser.add_argument('config_file')
-    parser.add_argument('--verbose', action='store_true')
+    # default=None so "not given" can be told from "given as false": with
+    # store_true alone the flag is False when absent, and `args.verbose is not
+    # None` was then always true, so the config file's verbose never applied.
+    parser.add_argument('--verbose', action='store_true', default=None)
     parser.add_argument('--auto_mode', action='store_true')
     parser.add_argument('--pid_tune', action='store_true')
     parser.add_argument('--target_weight', type=decimal.Decimal, default=0)

@@ -46,6 +46,16 @@ short probe rather than an aimed dose. Both account for the motor's spin-up
 (`pulse_dead_time`): without that, a rate measured from a short pulse reads low — most of
 that pulse was spin-up — and the pulse sized from it comes out too long.
 
+**Powder arrives as whole grains, and the feeder is built around that.** One grain of
+stick powder and one division of a 0.02 gn scale are about the same weight, so a pulse
+delivers no grain, one, or three — never 0.01 gn. Three consequences: the feed rate is
+measured over a *window* of pulses rather than one at a time (judging each pulse alone,
+and discarding the ones that read zero, keeps the hits and throws away the misses, which
+overestimated the rate threefold on the bench); a run of pulses without a grain is
+ordinary and does not mean the hopper is empty; and inside a few divisions of target the
+feeder stops calculating doses that cannot exist and simply places one grain at a time.
+±0.02 gn is the floor, and no setting gets below it.
+
 That learned rate is kept between charges and shown on the tuning page, scoped to the
 selected **powder profile** — so switching from a stick powder to a ball powder switches
 the estimate rather than blending the two into an average that fits neither. Profiles are
@@ -140,8 +150,14 @@ place. The sections worth knowing:
 
 **Tuning for accuracy:** `pulse_trickle_weight` must be comfortably larger than what a
 trickler can throw during the time the scale takes to report a change — feed rate ×
-scale lag. If charges run heavy, raise that first. `pulse_min_on_time` sets the finest
-dose the machine can place, and so the best accuracy it can reach.
+scale lag. If charges run heavy, raise that first.
+
+**Tuning for speed:** raise `pulse_pwm`. A vibratory trickler at its stall speed can be
+slow enough that the final approach takes over a minute, and since one grain is already a
+whole scale division, running the motor harder costs nothing in accuracy until a single
+pulse starts dropping several grains at once. On the reference machine — Frankford
+Arsenal tricklers with 11,000 RPM vibration motors — 25% delivered 0.036 gn/s and took 77
+seconds; 30% roughly tripled that.
 
 ## Services
 
