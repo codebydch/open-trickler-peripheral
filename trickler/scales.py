@@ -538,9 +538,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Parse the config file.
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    config.read(args.config_file)
+    config = helpers.load_config(args.config_file)
 
     # Order of priority is 1) command-line argument, 2) config file, 3) default.
     kwargs = {}
