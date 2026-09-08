@@ -279,9 +279,19 @@ class PulseFeeder:
         return max(computed, self.resolution)
 
     def done(self, remainder):
-        """True once another pulse would miss the target by more than stopping short does."""
-        return remainder <= max(self.min_dose / 2, self._settings.cutoff_weight,
-                                self.resolution / 2)
+        """True once another pulse would miss the target by more than stopping short does.
+
+        `min_dose` only earns a say here once a pulse has actually been weighed. It is
+        rate x the shortest pulse, so a seed rate several times too high says the machine
+        cannot place less than several grains, and the charge is declared finished before
+        it has fired anything: seeded at 3 gn/s, a pan 0.04 gn short was called complete
+        on the strength of a number nothing had measured. A guess may not widen the
+        finish line -- it can only be narrowed to what the scale can resolve.
+        """
+        floor = max(self._settings.cutoff_weight, self.resolution / 2)
+        if not self._rate_measured:
+            return remainder <= floor
+        return remainder <= max(self.min_dose / 2, floor)
 
     def settled_weight(self, min_wait=0.0):
         """The settled scale reading, using this feeder's configured settle times."""

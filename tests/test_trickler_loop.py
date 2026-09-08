@@ -51,16 +51,58 @@ class ChargeAccuracyTest(unittest.TestCase):
     which is also one division of the scale, so a charge can land on the target or one
     grain either side of it and there is no third option. Asking for better is asking the
     machine to split a grain of Varget.
+
+    It is also not centred on the target. The shipped `cutoff_weight` stops the charge one
+    division short on purpose -- a light charge is trickled up in seconds, a heavy one has
+    to be dumped and thrown again -- so these check the reading the operator sees against
+    that, and the true weight against that plus the half division the scale rounds away.
     """
 
+    def assert_landed_well(self, machine, scale, target, note=''):
+        """Checks a finished charge against what the machine can actually promise.
+
+        Two claims, because they fail for different reasons. The reading is what the
+        feeder was steering by and should sit within `cutoff_weight` of target every time;
+        the true weight in the pan can be half a division lighter again, since the reading
+        that stopped the charge was rounded up to get there.
+        """
+        cutoff = D(fakes.load_config()['trickler']['cutoff_weight'])
+        reported = scale.weight - target
+        self.assertLessEqual(abs(reported), cutoff,
+                             'scale read %s off target%s' % (reported, note))
+        error = machine.true_weight - target
+        self.assertLessEqual(error, machine.largest_grain,
+                             'landed %s over target%s' % (error, note))
+        self.assertGreaterEqual(error, -(cutoff + machine.resolution / 2),
+                                'landed %s under target%s' % (error, note))
+
     def test_lands_within_one_grain(self):
-        for start in ('43.80', '44.50', '44.90'):
+        # 44.96 is in the list because a charge that starts already inside the endgame
+        # takes a different path through the feeder: it never trickles, and the first
+        # thing it does is decide whether it is finished.
+        for start in ('43.80', '44.50', '44.90', '44.96'):
             with self.subTest(start=start):
                 machine = fakes.SimulatedMachine(start)
-                run_charge(machine, D('45.00'))
-                error = machine.true_weight - D('45.00')
-                self.assertLessEqual(abs(error), machine.kernel,
-                                     'landed %s off target' % error)
+                scale = run_charge(machine, D('45.00'))
+                self.assert_landed_well(machine, scale, D('45.00'))
+
+    def test_a_high_seed_rate_does_not_finish_the_charge_before_it_starts(self):
+        """`min_dose` is the seed rate times the shortest pulse, and `done()` used to
+        widen its threshold by half of it whether or not anything had been weighed. Seeded
+        at 3 gn/s it claimed the machine could not place less than 0.09 gn, so a pan 0.04
+        short was declared complete without a single pulse being fired.
+
+        Reachable from the tuning page, where the starting feed rate goes up to 20.
+        """
+        for seed in (3.0, 20.0):
+            with self.subTest(seed=seed):
+                machine = fakes.SimulatedMachine('44.96')
+                scale = run_charge(
+                    machine, D('45.00'), config=fakes.load_config(pulse_rate=seed))
+                self.assertGreater(machine.true_weight, D('44.97'),
+                                   'gave up without pulsing, on a rate nothing measured')
+                self.assert_landed_well(
+                    machine, scale, D('45.00'), ' from a seed rate of %s' % seed)
 
     def test_never_overshoots_badly_across_trickler_speeds(self):
         """A faster trickler must not blow past the target."""
@@ -74,14 +116,13 @@ class ChargeAccuracyTest(unittest.TestCase):
     def test_a_wrong_seed_rate_is_learned_away(self):
         """The feeder measures what it delivers, so the configured starting rate should
         barely matter."""
-        errors = []
-        for seed in (0.05, 0.3, 3.0):
-            machine = fakes.SimulatedMachine('44.50')
-            run_charge(machine, D('45.00'), config=fakes.load_config(pulse_rate=seed))
-            errors.append(machine.true_weight - D('45.00'))
-        for error in errors:
-            self.assertLessEqual(abs(error), D('0.02'),
-                                 'seed changed the outcome: %s' % errors)
+        for seed in (0.05, 0.3, 3.0, 20.0):
+            with self.subTest(seed=seed):
+                machine = fakes.SimulatedMachine('44.50')
+                scale = run_charge(
+                    machine, D('45.00'), config=fakes.load_config(pulse_rate=seed))
+                self.assert_landed_well(
+                    machine, scale, D('45.00'), ' from a seed rate of %s' % seed)
 
 
 class ExitPathTest(unittest.TestCase):
@@ -204,6 +245,12 @@ class GranularDeliveryTest(unittest.TestCase):
     """
 
     def feeder(self, scale=None, **overrides):
+        # The dose sequences below were recorded from the machine on 2026-09-07, when it
+        # was pulsing for 0.2 s and its spin-up was configured as 0.02 -- so that is the
+        # spin-up the gn/s figures quoted in these tests were worked out against, and it
+        # is pinned here rather than taken from the shipped config. What is under test is
+        # how the learner treats a run of doses, which the spin-up does not change.
+        overrides.setdefault('pulse_dead_time', 0.02)
         config = fakes.load_config(**overrides)
         if scale is None:
             scale = mock.Mock()
@@ -359,7 +406,9 @@ class PulseSpeedTest(unittest.TestCase):
     def test_the_first_measurement_replaces_the_guess_outright(self):
         """Easing towards it would leave the next pulse sized on a number nothing has
         measured."""
-        feeder = self.feeder()
+        # The spin-up is pinned rather than taken from the config: this is about the
+        # arithmetic, and it should keep testing that when the shipped default changes.
+        feeder = self.feeder(pulse_dead_time=0.02)
         feeder._learn(0.22, D('0.10'), fast=True)   # 0.10 gn in 0.2 s of movement
         self.assertAlmostEqual(feeder.fast_rate, 0.5, places=6)
 
@@ -423,7 +472,8 @@ class SpinUpTest(unittest.TestCase):
     def test_short_and_long_pulses_measure_the_same_rate(self):
         """The property that matters: a probe and a full pulse have to agree, or the
         pulse sized from the probe is wrong."""
-        short, long_ = self.feeder(), self.feeder()
+        short = self.feeder(pulse_dead_time=0.02)
+        long_ = self.feeder(pulse_dead_time=0.02)
         short._learn(0.07, D('0.05'), fast=True)    # 0.05 s moving at 1.0 gn/s
         long_._learn(0.52, D('0.50'), fast=True)    # 0.50 s moving at 1.0 gn/s
         self.assertAlmostEqual(short.fast_rate, long_.fast_rate, places=6)

@@ -40,11 +40,45 @@ check_clean_tree() {
   dirty="$(git status --porcelain)"
   if [[ -n ${dirty} ]]; then
     printf '\n\033[31mThe working tree has local changes:\033[0m\n\n%s\n\n' "${dirty}" >&2
-    # opentrickler_config.ini is tracked, so a blind checkout would throw away tuning.
-    die "Commit, stash or revert these first. Note that opentrickler_config.ini is tracked, so anything you tuned by hand shows up here -- don't discard it without looking."
+    # Tuning no longer shows up here: opentrickler_config.ini is git-ignored, and only
+    # opentrickler_config.ini.example is tracked. Anything listed above is a real edit.
+    die "Commit, stash or revert these first."
   fi
   info "Clean."
   sudo -v
+}
+
+# Reports settings the update added, so a new tuning value doesn't sit at its fallback
+# unnoticed. Never edits the live config: the values in it are the machine's, and only
+# its owner knows which of them were arrived at with a scale and a pan of powder.
+check_config() {
+  step "Checking the tuning config"
+  local live="${REPO_DIR}/opentrickler_config.ini"
+  local example="${REPO_DIR}/opentrickler_config.ini.example"
+
+  if [[ ! -f ${live} ]]; then
+    cp "${example}" "${live}"
+    info "Created opentrickler_config.ini from the shipped example."
+    return
+  fi
+
+  local added=()
+  local key
+  while IFS= read -r key; do
+    grep -qE "^[[:space:]]*${key}[[:space:]]*=" "${live}" || added+=("${key}")
+  done < <(grep -oE '^[a-z_]+[[:space:]]*=' "${example}" | tr -d ' =' | sort -u)
+
+  if [[ ${#added[@]} -eq 0 ]]; then
+    skip "no new settings."
+    return
+  fi
+  info "This update adds ${#added[@]} setting(s) your config doesn't have yet:"
+  for key in "${added[@]}"; do
+    printf '      %s = %s\n' "${key}" \
+      "$(grep -m1 -E "^${key}[[:space:]]*=" "${example}" | cut -d= -f2- | xargs)"
+  done
+  info "They fall back to those values until you set them. See the example file for what"
+  info "each one does, or set them from the tuning page at http://opentrickler.local"
 }
 
 pull_code() {
@@ -130,6 +164,7 @@ main() {
   CHANGED=""
   check_clean_tree
   pull_code
+  check_config
   update_dependencies
   publish_web_pages
   update_nginx

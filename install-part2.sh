@@ -44,7 +44,7 @@ check_preconditions() {
   if ! "${VENV_DIR}/bin/python" -c 'import board' >/dev/null 2>&1; then
     die "Adafruit Blinka is not working yet. Run install-part1.sh, then reboot, then run this."
   fi
-  [[ -f "${REPO_DIR}/opentrickler_config.ini" ]] || die "Run this from the repository: ${REPO_DIR} doesn't look like the checkout."
+  [[ -f "${REPO_DIR}/opentrickler_config.ini.example" ]] || die "Run this from the repository: ${REPO_DIR} doesn't look like the checkout."
   info "Virtual environment and Blinka are in place."
   # Not fatal: everything except the screen works without it.
   if [[ ! -e /dev/spidev0.0 ]]; then
@@ -106,6 +106,20 @@ publish_web_pages() {
   info "Copied ${#pages[@]} pages."
 }
 
+# The live config is not in git -- the control panel writes tuning back to it, and a
+# tracked file would put every tuned value in the way of the next `git pull`. So it is
+# made here, once, from the shipped example, and never touched again by an update.
+create_config() {
+  step "Creating the tuning config"
+  local live="${REPO_DIR}/opentrickler_config.ini"
+  if [[ -f ${live} ]]; then
+    skip "opentrickler_config.ini already exists; leaving your settings alone."
+    return
+  fi
+  cp "${REPO_DIR}/opentrickler_config.ini.example" "${live}"
+  info "Created ${live}."
+}
+
 create_history_dir() {
   step "Creating ${HISTORY_DIR} for the charge history"
   if [[ -d ${HISTORY_DIR} ]]; then
@@ -151,8 +165,9 @@ Open http://opentrickler.local (or this Pi's IP address).
 
 Before the first charge, check the scale settings in
 ${REPO_DIR}/opentrickler_config.ini -- the [scale] model and port have to match
-your hardware. Then set the trickler motors' stall speed on the tuning page at
-http://opentrickler.local/app/config/
+your hardware. That file is yours: it is not in git, so nothing you tune there
+will be overwritten by update.sh. Then set the trickler motors' stall speed on
+the tuning page at http://opentrickler.local/app/config/
 
 EOF
 }
@@ -162,6 +177,7 @@ main() {
   install_websocketd
   configure_nginx
   publish_web_pages
+  create_config
   create_history_dir
   install_services
   report

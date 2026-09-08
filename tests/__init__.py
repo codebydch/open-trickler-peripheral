@@ -16,7 +16,10 @@ import sys
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(ROOT, 'opentrickler_config.ini')
+# The shipped copy, not the live one. A machine's own opentrickler_config.ini holds
+# whatever its owner has tuned, so testing against it would mean the suite passes or
+# fails depending on the trickler it happens to be sitting next to.
+CONFIG_PATH = os.path.join(ROOT, 'opentrickler_config.ini.example')
 
 if os.path.join(ROOT, 'trickler') not in sys.path:
     sys.path.insert(0, os.path.join(ROOT, 'trickler'))

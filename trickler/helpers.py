@@ -120,18 +120,20 @@ TRICKLER_SETTINGS = (
         'Grains still to go when continuous trickling stops for good. Below this every '
         'pulse is weighed before the next one is fired.'),
     TricklerSetting(
-        'pulse_on_time', 'Longest pulse', '0.6', 0.005, 2.0, 0.005,
+        'pulse_on_time', 'Longest pulse', '0.4', 0.005, 2.0, 0.005,
         'Seconds. Upper limit on how long a single pulse may run. Every pulse costs the '
-        'same wait to weigh it, so a cap that forces extra pulses costs real time.'),
+        'same wait to weigh it, so a cap that forces extra pulses costs real time. Raise '
+        'it until charges start coming out heavy, then back off.'),
     TricklerSetting(
-        'pulse_dead_time', 'Motor spin-up', '0.02', 0.0, 0.5, 0.005,
+        'pulse_dead_time', 'Motor spin-up', '0.12', 0.0, 0.5, 0.005,
         'Seconds at the start of a pulse before the motor is actually moving powder. '
-        'Without it, a rate measured from a short pulse reads low -- most of that pulse '
-        'was spin-up -- and the next pulse comes out too long.'),
+        'Measure it rather than guessing: pulse at two different lengths and solve the '
+        'two mean doses for the rate and the spin-up. Set too low, the feeder thinks a '
+        'short pulse delivers more than it does and the last grains take forever.'),
     TricklerSetting(
-        'pulse_min_on_time', 'Shortest pulse', '0.03', 0.005, 2.0, 0.005,
-        'Seconds. The smallest pulse worth firing. This sets the finest dose the machine '
-        'can place, and so the best accuracy it can reach.'),
+        'pulse_min_on_time', 'Shortest pulse', '0.15', 0.005, 2.0, 0.005,
+        'Seconds. The smallest pulse worth firing. A pulse at or below the motor spin-up '
+        'above cannot move powder at all, so keep this well clear of it.'),
     TricklerSetting(
         'pulse_off_time', 'Pause after each pulse', '0.1', 0.0, 5.0, 0.05,
         'Seconds to wait for the powder to land before weighing what the pulse delivered.'),
@@ -170,13 +172,17 @@ TRICKLER_SETTINGS = (
         'settle_timeout', 'Settle timeout', '1.0', 0.1, 10.0, 0.1,
         'Seconds to wait for the scale to report stable before using whatever it last said.'),
     TricklerSetting(
-        'cutoff_weight', 'Stop short by', '0.01', 0.0, 1.0, 0.01,
-        'Grains. A floor under the feeder\'s own stopping rule. Raise it if charges still '
-        'run heavy, lower it toward 0 if they run light.'),
+        'cutoff_weight', 'Stop short by', '0.02', 0.0, 1.0, 0.01,
+        'Grains. A floor under the feeder\'s own stopping rule. Since the scale reads in '
+        'steps, this really chooses between stopping one step light every time and '
+        'landing on target but sometimes one step heavy. A light charge is trickled up; '
+        'a heavy one has to be dumped.'),
     TricklerSetting(
-        'rate_window', 'Feed rate samples', '4', 2.0, 20.0, 1.0,
+        'rate_window', 'Feed rate samples', '12', 2.0, 20.0, 1.0,
         'Scale readings averaged when judging how fast powder is landing during the '
-        'continuous phases.'),
+        'continuous phases. The loop reads faster than the scale updates and powder '
+        'lands in lumps, so too few samples measure the scale\'s step rather than a '
+        'rate, and continuous trickling hands over at a different weight every charge.'),
     TricklerSetting(
         'lookahead_time', 'Look ahead', '0.35', 0.0, 2.0, 0.05,
         'Seconds. How far ahead to project the feed rate when deciding to slow down. '

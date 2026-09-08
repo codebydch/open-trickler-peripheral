@@ -136,3 +136,8 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# The live tuning config. opentrickler_config.ini.example is the shipped copy; the
+# installer makes this from it, and the control panel writes tuning back to it. Tracking
+# it would mean every value you tune shows up as a local change and blocks update.sh.
+/opentrickler_config.ini
