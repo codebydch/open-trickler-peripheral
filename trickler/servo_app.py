@@ -22,7 +22,10 @@ DEFAULTS = dict(
 
 parser = argparse.ArgumentParser(description='Run OpenTrickler Flask Servo App.')
 parser.add_argument('config_file')
-parser.add_argument('--verbose', action='store_true')
+# default=None so "not given" can be told from "given as false": with
+# store_true alone the flag is False when absent, and `args.verbose is not
+# None` was then always true, so the config file's verbose never applied.
+parser.add_argument('--verbose', action='store_true', default=None)
 args = parser.parse_args()
     
 config = configparser.ConfigParser()

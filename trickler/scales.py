@@ -527,7 +527,10 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Test scale.')
     parser.add_argument('config_file')
-    parser.add_argument('--verbose', action='store_true')
+    # default=None so "not given" can be told from "given as false": with
+    # store_true alone the flag is False when absent, and `args.verbose is not
+    # None` was then always true, so the config file's verbose never applied.
+    parser.add_argument('--verbose', action='store_true', default=None)
     parser.add_argument('--scale', choices=SCALES.keys())
     parser.add_argument('--scale_port')
     parser.add_argument('--scale_baudrate', type=int)

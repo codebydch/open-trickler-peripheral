@@ -8,6 +8,7 @@ between `main.py` and `scales.py`, which a test using a stubbed scale object can
 import configparser
 import decimal
 import enum
+import random
 
 import motors
 
@@ -180,13 +181,24 @@ class SimulatedMachine:
 
     The scale side is driven through a real `SerialScale` subclass over `self.port`, so
     tests exercise the actual framing and parsing rather than a stubbed weight attribute.
+
+    Powder arrives as whole kernels, not as a smooth fluid, because that is what the
+    machine does. Every dose ever measured on the bench was a multiple of 0.02 gn --
+    0.00, 0.02, 0.04, 0.06, never 0.01 or 0.03 -- since one grain of stick powder and one
+    division of the scale are both about that. Modelling it as a fluid is what hid four
+    separate defects: a rate estimate biased three times high, charges abandoned as
+    "hopper empty" when a couple of pulses happened to drop no grain, aiming for doses
+    that cannot exist, and a stopping rule finer than the machine can see.
+
+    Set `kernel` to 0 for the old continuous behaviour.
     """
 
     def __init__(self, start_weight, fine_rate=0.3, coarse_rate=0.6,
                  lag=2, resolution='0.02', frame=and_frame, min_pwm=25.0,
-                 stable_samples=3):
+                 stable_samples=3, kernel='0.02', seed=1):
         self.true_weight = D(str(start_weight))
         self.resolution = D(resolution)
+        self.kernel = D(str(kernel))
         self.elapsed = 0.0
         self.lag = lag
         self.stable_samples = stable_samples
@@ -195,11 +207,44 @@ class SimulatedMachine:
         self._recent_reported = []
         self.motor1 = VibratoryMotor(fine_rate, min_pwm)
         self.motor2 = VibratoryMotor(coarse_rate, min_pwm)
+        # Powder the motors have moved but that has not yet fallen as a whole grain.
+        self._pending = D('0')
+        # Which grain falls when is chance, but a repeatable one: a test that fails
+        # should fail the same way next time.
+        self._random = random.Random(seed)
+        self._next_grain = self._grain_weight()
         # When muted the scale stops sending, as if the serial link had dropped.
         self.mute = False
         self.port = FakeSerial()
         self.port.on_timeout = lambda: self.tick(0.1)
         self._emit()
+
+    def _grain_weight(self):
+        """One grain of powder. Not all the same: stick powder is cut, not milled, so
+        grains vary by a quarter either way. A simulator where every grain weighs exactly
+        one scale division lets a charge land dead on target every time, which flatters
+        the code and teaches nothing."""
+        return self.kernel * D(str(round(self._random.uniform(0.75, 1.25), 4)))
+
+    def _deliver(self, weight):
+        """Turns continuous flow into whole grains landing in the pan.
+
+        Powder the motor has moved accumulates, and grains fall off the lip one at a
+        time as enough of it arrives. The remainder sits on the ramp, which is why a
+        pulse can deliver nothing and the next one two grains.
+        """
+        if self.kernel <= 0:
+            return D(str(weight))
+        self._pending += D(str(weight))
+        delivered = D('0')
+        while self._pending >= self._next_grain:
+            # A grain teetering on the lip waits for a later pulse.
+            if self._random.random() < 0.15:
+                break
+            self._pending -= self._next_grain
+            delivered += self._next_grain
+            self._next_grain = self._grain_weight()
+        return delivered
 
     def _reported(self):
         """What the scale would display now: `lag` samples behind, rounded to a division."""
@@ -223,7 +268,7 @@ class SimulatedMachine:
     def tick(self, dt):
         """Advances the simulation, landing powder and emitting a fresh frame."""
         for motor in (self.motor1, self.motor2):
-            self.true_weight += D(str(round(motor.flow(dt), 7)))
+            self.true_weight += self._deliver(round(motor.flow(dt), 7))
         self._history.append(self.true_weight)
         self.elapsed += dt
         self._emit()
