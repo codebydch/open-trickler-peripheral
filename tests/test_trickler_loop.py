@@ -186,6 +186,148 @@ if __name__ == '__main__':
     unittest.main()
 
 
+class PulseSpeedTest(unittest.TestCase):
+    """Two pulse speeds: coarse while there is a way to go, fine to finish.
+
+    Every pulse costs the same wait to weigh it whatever it delivered, so a quicker
+    charge means fewer, larger pulses. Simply running the motor faster throughout would
+    not do -- that coarsens the smallest dose the machine can place, which is what sets
+    the accuracy -- so the last pulses drop back to the fine speed.
+    """
+
+    def feeder(self, memcache=None, **overrides):
+        config = fakes.load_config(**overrides)
+        scale = mock.Mock()
+        scale.Units = scales.ANDScale.Units
+        scale.resolution = D('0.02')
+        constants = fakes.constants_for(config) if memcache is not None else None
+        settings = main.trickler_settings(
+            config, memcache, constants, scale, scales.ANDScale.Units.GRAINS)
+        return main.PulseFeeder(mock.Mock(), scale, settings, memcache, constants)
+
+    def test_far_from_target_uses_the_fast_speed(self):
+        feeder = self.feeder()
+        self.assertTrue(feeder._use_fast_speed(D('0.40')))
+
+    def test_the_last_pulses_use_the_fine_speed(self):
+        feeder = self.feeder()
+        self.assertFalse(feeder._use_fast_speed(D('0.05')))
+
+    def test_the_two_speeds_are_the_configured_ones(self):
+        feeder = self.feeder(pulse_pwm=25, pulse_fast_pwm=45)
+        self.assertAlmostEqual(feeder._pulse_speed(fast=False), 0.25)
+        self.assertAlmostEqual(feeder._pulse_speed(fast=True), 0.45)
+
+    def test_neither_speed_is_ever_below_the_stall_point(self):
+        feeder = self.feeder(pulse_pwm=5, pulse_fast_pwm=8, stall_pwm=20)
+        self.assertAlmostEqual(feeder._pulse_speed(fast=False), 0.20)
+        self.assertAlmostEqual(feeder._pulse_speed(fast=True), 0.20)
+
+    def test_matching_the_speeds_turns_the_feature_off(self):
+        """The way back to single-speed pulsing, from the tuning page."""
+        feeder = self.feeder(pulse_fast_pwm=25, pulse_pwm=25)
+        self.assertFalse(feeder._use_fast_speed(D('5.00')))
+
+    def test_each_speed_learns_its_own_rate(self):
+        """Folding a fast pulse into the fine rate would make the pulses that finish the
+        charge several times too long."""
+        feeder = self.feeder()
+        fine_before = feeder.rate
+        feeder._learn(0.20, D('0.30'), fast=True)
+        self.assertEqual(feeder.rate, fine_before, 'the fine rate must not move')
+        self.assertGreater(feeder.fast_rate, fine_before)
+
+    def test_the_fast_rate_is_guessed_before_it_is_measured(self):
+        """Only to size the very first probe: 45% drive against a 20% stall is five
+        times the powder of 25%, which is a starting point, not a measurement."""
+        feeder = self.feeder(pulse_rate=0.3, pulse_pwm=25, pulse_fast_pwm=45, stall_pwm=20)
+        self.assertAlmostEqual(feeder.fast_rate, 1.5)
+
+    def test_the_first_measurement_replaces_the_guess_outright(self):
+        """Easing towards it would leave the next pulse sized on a number nothing has
+        measured."""
+        feeder = self.feeder()
+        feeder._learn(0.22, D('0.10'), fast=True)   # 0.10 gn in 0.2 s of movement
+        self.assertAlmostEqual(feeder.fast_rate, 0.5, places=6)
+
+    def test_a_speed_that_has_never_been_measured_is_probed_not_aimed(self):
+        """A rate nothing has measured is a guess, and at the fast speed with a long
+        pulse cap a guess that is badly low would dump the whole remainder at once."""
+        feeder = self.feeder()
+        probe = feeder._probe_time(D('1.50'), fast=True)
+        aimed = 1.4 * feeder.settings.pulse_aim / feeder.fast_rate
+        self.assertLess(probe, aimed)
+
+    def test_a_probe_still_clears_the_motor_spin_up(self):
+        """A pulse shorter than the spin-up delivers nothing, and measures nothing."""
+        feeder = self.feeder()
+        for remainder in ('0.15', '1.50', '20.00'):
+            with self.subTest(remainder=remainder):
+                probe = feeder._probe_time(D(remainder), fast=True)
+                self.assertGreater(probe, feeder.settings.pulse_dead_time)
+
+    def test_the_rates_are_kept_separately_per_profile(self):
+        config = fakes.load_config()
+        constants = fakes.constants_for(config)
+        fine = main.learned_rate_key(constants, 'Varget')
+        fast = main.learned_rate_key(constants, 'Varget', fast=True)
+        self.assertNotEqual(fine, fast)
+        self.assertIn('Varget', fast)
+
+    def test_both_rates_survive_to_the_next_charge(self):
+        memcache = fakes.FakeMemcache()
+        feeder = self.feeder(memcache=memcache)
+        feeder._learn(0.22, D('0.10'), fast=True)
+        feeder._learn(0.22, D('0.05'), fast=False)
+        again = self.feeder(memcache=memcache)
+        self.assertAlmostEqual(again.fast_rate, feeder.fast_rate)
+        self.assertAlmostEqual(again.rate, feeder.rate)
+
+
+class SpinUpTest(unittest.TestCase):
+    """A pulse only moves powder once the motor is up to speed.
+
+    Without accounting for it, a rate measured from a short pulse reads low -- most of
+    that pulse was spin-up -- and the pulse sized from that rate comes out too long. It
+    is what made the first fast pulses overshoot while this was being built.
+    """
+
+    def feeder(self, **overrides):
+        config = fakes.load_config(**overrides)
+        scale = mock.Mock()
+        scale.Units = scales.ANDScale.Units
+        scale.resolution = D('0.02')
+        settings = main.trickler_settings(
+            config, None, None, scale, scales.ANDScale.Units.GRAINS)
+        return main.PulseFeeder(mock.Mock(), scale, settings)
+
+    def test_the_rate_is_measured_over_the_moving_part_of_a_pulse(self):
+        feeder = self.feeder(pulse_dead_time=0.02)
+        feeder._learn(0.12, D('0.10'), fast=True)
+        # 0.10 gn over 0.10 s of movement, not over the 0.12 s the motor was powered.
+        self.assertAlmostEqual(feeder.fast_rate, 1.0, places=6)
+
+    def test_short_and_long_pulses_measure_the_same_rate(self):
+        """The property that matters: a probe and a full pulse have to agree, or the
+        pulse sized from the probe is wrong."""
+        short, long_ = self.feeder(), self.feeder()
+        short._learn(0.07, D('0.05'), fast=True)    # 0.05 s moving at 1.0 gn/s
+        long_._learn(0.52, D('0.50'), fast=True)    # 0.50 s moving at 1.0 gn/s
+        self.assertAlmostEqual(short.fast_rate, long_.fast_rate, places=6)
+
+    def test_a_pulse_that_is_all_spin_up_teaches_nothing(self):
+        feeder = self.feeder(pulse_dead_time=0.05)
+        before = feeder.rate
+        feeder._learn(0.04, D('0.03'))
+        self.assertEqual(feeder.rate, before)
+
+    def test_the_finest_dose_accounts_for_the_spin_up(self):
+        """min_dose sets where a charge stops, so it has to be the weight a shortest
+        pulse really delivers."""
+        feeder = self.feeder(pulse_min_on_time=0.05, pulse_dead_time=0.02, pulse_rate=1.0)
+        self.assertAlmostEqual(float(feeder.min_dose), 0.03, places=6)
+
+
 class PulseLearningTest(unittest.TestCase):
     """What the feeder is allowed to learn from."""
 
