@@ -116,5 +116,41 @@ class ShippedConfigTest(unittest.TestCase):
                                  float(setting.default))
 
 
+class ShippedDefaultsTest(unittest.TestCase):
+    """Relationships between the shipped tuning values that have to hold on any machine.
+
+    Not a taste test -- someone tuning their own trickler can set whatever they like from
+    the control panel. These are the ones where a shipped default that breaks the
+    relationship makes the machine visibly worse out of the box.
+    """
+
+    def setUp(self):
+        self.defaults = {s.name: float(s.default) for s in helpers.TRICKLER_SETTINGS}
+
+    def test_the_shortest_pulse_outlasts_the_motor_spin_up(self):
+        """A pulse that ends before the motor has started moving powder delivers
+        nothing, however many times it is fired. Shipped as 0.03 s against a spin-up
+        measured at 0.118, which is how the last few grains of a charge turned into a
+        run of pulses that each did nothing.
+        """
+        self.assertGreater(self.defaults['pulse_min_on_time'],
+                           self.defaults['pulse_dead_time'],
+                           'the shortest pulse must be longer than the spin-up')
+
+    def test_the_longest_pulse_can_place_more_than_one_grain(self):
+        """Otherwise the cap, not the feed rate, decides how long a charge takes."""
+        moving = self.defaults['pulse_on_time'] - self.defaults['pulse_dead_time']
+        self.assertGreater(moving, 2 * (self.defaults['pulse_min_on_time'] -
+                                        self.defaults['pulse_dead_time']))
+
+    def test_the_feed_rate_window_spans_more_than_the_scale_step(self):
+        """The control loop reads several times faster than the scale updates, so a
+        short window measures the scale's 0.02 gn step rather than a feed rate, and
+        continuous trickling hands over to the pulse feeder at a different weight every
+        charge. Ten samples is roughly half a second at the loop's rate.
+        """
+        self.assertGreaterEqual(self.defaults['rate_window'], 10)
+
+
 if __name__ == '__main__':
     unittest.main()

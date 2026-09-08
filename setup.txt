@@ -89,6 +89,11 @@ sudo cp websocketd /usr/sbin
 # this used to need, has been archived by its author and is gone from Trixie onwards.
 sudo apt install python3-lgpio
 
+# The tuning config. Only the .example is in git; the live file is ignored, so the
+# control panel can write tuning back to it without getting in the way of a git pull.
+cd /code/open-trickler-peripheral
+cp opentrickler_config.ini.example opentrickler_config.ini
+
 # Charge history directory (the trickler creates it, but do it here so ownership is sane)
 sudo mkdir -p /var/lib/opentrickler
 

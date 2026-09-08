@@ -47,16 +47,24 @@ fine_trickle_weight = 1.5
 # comfortably bigger than what motor 1 can throw during the scale's lag.
 pulse_trickle_weight = 0.5
 # Longest a single pulse may run, in seconds. The pulse feeder sizes each pulse from
-# what it has learned, and never asks for more than this.
-pulse_on_time = 0.6
+# what it has learned, and never asks for more than this. Measured on the bench: at 0.2
+# the cap bound almost every pulse and the charge crawled; 0.4 more than tripled what a
+# pulse delivers, and past that the gain flattens while a clump gets big enough to
+# overshoot.
+pulse_on_time = 0.4
 # Seconds at the start of a pulse before the motor is actually moving powder. A pulse
 # delivers rate x (on_time - this), so without it a rate measured from a short pulse reads
 # low -- most of that pulse was spin-up -- and the pulse sized from it comes out too long.
-pulse_dead_time = 0.02
+# Measure it: run a batch of pulses at two lengths and solve the two mean doses for rate
+# and spin-up. On a Frankford Arsenal trickler driven by a 3 V vibration motor, 120 pulses
+# at 0.2 s averaged 0.0178 gn and 32 at 0.4 s averaged 0.0613 -- 3.4x the powder for twice
+# the pulse, which only solves at a spin-up of 0.118 s and a steady rate of 0.217 gn/s.
+# Guessing it low makes the endgame fire pulses too short to move a grain.
+pulse_dead_time = 0.12
 # Shortest pulse worth firing, in seconds. Together with the spin-up above this sets the
-# finest dose the machine can place, and so the best accuracy it can reach. Too short and
-# the motor won't move any powder before it stops again.
-pulse_min_on_time = 0.03
+# finest dose the machine can place, and so the best accuracy it can reach. Anything at or
+# below the spin-up cannot move powder at all, so keep it comfortably above that value.
+pulse_min_on_time = 0.15
 # How long to pause after each pulse so the powder can land, in seconds. The feeder
 # then waits for the scale to report stable before weighing the result.
 pulse_off_time = 0.1
@@ -98,8 +106,13 @@ settle_timeout = 1.0
 # under that, not the main brake. Lower it toward 0 once pulse learning is dialed in.
 cutoff_weight = 0.01
 # Number of scale readings averaged when working out how fast powder is landing
-# during the continuous phases.
-rate_window = 4
+# during the continuous phases. The loop reads far faster than the scale updates, and
+# powder lands in lumps, so too short a window measures the scale's 0.02 gn step rather
+# than a rate: at 4 samples (0.14 s) the in-flight estimate swung between one and three
+# divisions and handed over to the pulse feeder anywhere from 0.3 to 1.1 grains short,
+# which set the charge time. 12 samples spans about half a second and holds the handover
+# inside a third of a grain.
+rate_window = 12
 # How far ahead, in seconds, to project that feed rate when deciding to slow down or
 # hand over to the pulse feeder. This covers the powder already in flight plus the
 # scale's own reporting lag. Set to 0 to disable the projection entirely.

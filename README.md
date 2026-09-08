@@ -129,7 +129,11 @@ Check what you actually ended up with using `swapon --show` and `free -h`.
 ## Configuration
 
 `opentrickler_config.ini` is the single source of truth, and every value is commented in
-place. The sections worth knowing:
+place. It is **not** in git — the control panel writes tuning back to it, so a tracked
+copy would put every value you set in the way of the next update. `install-part2.sh`
+creates it from `opentrickler_config.ini.example`, which is the tracked file holding the
+shipped defaults; `update.sh` leaves your copy alone and tells you about settings a new
+version added. The sections worth knowing:
 
 - `[scale]` — model, serial port, baud rate. Supports A&D, Creedmoor and U.S. Solid.
 - `[motor1]` / `[motor2]` — GPIO pin and PWM limits per trickler. `trickler_min_pwm` is
@@ -196,9 +200,9 @@ A pull on its own is not enough. nginx serves *copies* of the pages from `/var/w
 and the unit files live in `/etc/systemd/system`, so both go stale. The script pulls,
 republishes the pages, refreshes the services and restarts them.
 
-It refuses to run with a dirty working tree, and says which files are modified. Take that
-seriously: `opentrickler_config.ini` is tracked, so anything you tuned by hand shows up
-there — don't discard it without looking. A partial update is also how the hardest bug in
+It refuses to run with a dirty working tree, and says which files are modified. Your
+tuning is not among them — `opentrickler_config.ini` is git-ignored — so anything listed
+is a real edit to the code. Take it seriously: a partial update is how the hardest bug in
 this project happened: `trickler/main.py`, `scales.py` and `helpers.py` depend on each
 other, and a mismatched set fails in ways that are hard to read.
 

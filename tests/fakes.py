@@ -134,7 +134,12 @@ class FakeSerial:
 # --- A simulated machine --------------------------------------------------------------
 
 STALL_PWM = 0.20        # below this the vibratory motor moves no powder
-SPIN_UP = 0.020         # seconds of running before powder actually starts moving
+# Seconds of running before powder actually starts moving. Measured on the bench, not
+# guessed: 120 pulses at 0.2 s averaged 0.0178 gn and 32 at 0.4 s averaged 0.0613 -- 3.4x
+# the powder for twice the pulse, which solves to a 0.118 s spin-up. It was 0.02 here for
+# a long time, and a simulator that starts feeding almost instantly cannot show the thing
+# that dominates a short pulse on the real machine.
+SPIN_UP = 0.12
 
 
 class VibratoryMotor:

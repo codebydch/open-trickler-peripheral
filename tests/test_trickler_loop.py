@@ -204,6 +204,12 @@ class GranularDeliveryTest(unittest.TestCase):
     """
 
     def feeder(self, scale=None, **overrides):
+        # The dose sequences below were recorded from the machine on 2026-09-07, when it
+        # was pulsing for 0.2 s and its spin-up was configured as 0.02 -- so that is the
+        # spin-up the gn/s figures quoted in these tests were worked out against, and it
+        # is pinned here rather than taken from the shipped config. What is under test is
+        # how the learner treats a run of doses, which the spin-up does not change.
+        overrides.setdefault('pulse_dead_time', 0.02)
         config = fakes.load_config(**overrides)
         if scale is None:
             scale = mock.Mock()
@@ -359,7 +365,9 @@ class PulseSpeedTest(unittest.TestCase):
     def test_the_first_measurement_replaces_the_guess_outright(self):
         """Easing towards it would leave the next pulse sized on a number nothing has
         measured."""
-        feeder = self.feeder()
+        # The spin-up is pinned rather than taken from the config: this is about the
+        # arithmetic, and it should keep testing that when the shipped default changes.
+        feeder = self.feeder(pulse_dead_time=0.02)
         feeder._learn(0.22, D('0.10'), fast=True)   # 0.10 gn in 0.2 s of movement
         self.assertAlmostEqual(feeder.fast_rate, 0.5, places=6)
 
@@ -423,7 +431,8 @@ class SpinUpTest(unittest.TestCase):
     def test_short_and_long_pulses_measure_the_same_rate(self):
         """The property that matters: a probe and a full pulse have to agree, or the
         pulse sized from the probe is wrong."""
-        short, long_ = self.feeder(), self.feeder()
+        short = self.feeder(pulse_dead_time=0.02)
+        long_ = self.feeder(pulse_dead_time=0.02)
         short._learn(0.07, D('0.05'), fast=True)    # 0.05 s moving at 1.0 gn/s
         long_._learn(0.52, D('0.50'), fast=True)    # 0.50 s moving at 1.0 gn/s
         self.assertAlmostEqual(short.fast_rate, long_.fast_rate, places=6)
