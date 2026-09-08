@@ -8,6 +8,7 @@ https://github.com/ammolytics/projects/tree/develop/trickler
 """
 import array
 import collections
+import configparser
 import csv
 import decimal
 import logging
@@ -28,6 +29,30 @@ def get_mc_client(server='127.0.0.1:11211'):
         serde=pymemcache.serde.PickleSerde(),
         connect_timeout=10,
         timeout=2)
+
+
+def load_config(path):
+    """Reads an ini file, failing with the path when it cannot be read.
+
+    configparser.read() accepts a path that does not exist, reads nothing and returns
+    quietly, so an absent config file becomes an empty one and the first section lookup
+    raises several lines later. On the machine that read as `KeyError: 'general'` from
+    four services at once, with the path they were looking for nowhere in the traceback.
+
+    Checking what read() actually read, rather than whether the file exists, catches a
+    file the daemon cannot open as well as one that is not there -- from here those are
+    the same problem and want the same message.
+    """
+    config = configparser.ConfigParser()
+    # Keep key case: the memcache_vars section is read back as an enum of its keys.
+    config.optionxform = str
+    if not config.read(path):
+        raise SystemExit(
+            'Cannot read the config file: %s\n'
+            'If this is a fresh checkout, or you have just updated, create it from the '
+            'shipped example:\n'
+            '    cp %s.example %s' % (path, path, path))
+    return config
 
 
 def setup_logging(level=logging.DEBUG):

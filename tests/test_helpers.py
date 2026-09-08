@@ -116,6 +116,56 @@ class ShippedConfigTest(unittest.TestCase):
                                  float(setting.default))
 
 
+class LoadConfigTest(unittest.TestCase):
+    """Reading the config file, and what happens when it isn't there.
+
+    This is the failure that took four services down at once: the live config stopped
+    being tracked, a `git pull` therefore removed it from checkouts that had it, and
+    every daemon died with `KeyError: 'general'` -- a section name, from a file that was
+    not on disk, with the path it wanted nowhere in the traceback.
+    """
+
+    def test_a_real_config_loads(self):
+        config = helpers.load_config(CONFIG_PATH)
+        self.assertIn('general', config)
+        self.assertIn('trickler', config)
+
+    def test_key_case_is_preserved(self):
+        """memcache_vars is turned into an enum of its keys, so lower-casing them
+        silently renames every variable the daemons share."""
+        config = helpers.load_config(CONFIG_PATH)
+        self.assertTrue(any(key != key.lower() for key in config['memcache_vars']),
+                        'expected at least one capitalised key to check against')
+
+    def test_a_missing_file_says_which_file(self):
+        path = os.path.join(tempfile.gettempdir(), 'opentrickler-not-here.ini')
+        self.assertFalse(os.path.exists(path))
+        with self.assertRaises(SystemExit) as caught:
+            helpers.load_config(path)
+        self.assertIn(path, str(caught.exception))
+
+    def test_a_missing_file_says_how_to_fix_it(self):
+        """The journal is where this gets read, so the message has to carry the fix."""
+        with self.assertRaises(SystemExit) as caught:
+            helpers.load_config('/nonexistent/opentrickler_config.ini')
+        self.assertIn('.example', str(caught.exception))
+
+    def test_a_file_that_cannot_be_read_is_not_silently_empty(self):
+        """A directory stands in for any unopenable path -- wrong permissions, a broken
+        symlink. configparser skips them all as quietly as a missing file."""
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(SystemExit):
+                helpers.load_config(directory)
+
+    def test_an_empty_file_is_not_an_error(self):
+        """It parses; it just has no sections. Whatever reads a section next is what
+        should complain, and it can say which section it wanted."""
+        handle, path = tempfile.mkstemp(suffix='.ini')
+        os.close(handle)
+        self.addCleanup(os.unlink, path)
+        self.assertEqual(helpers.load_config(path).sections(), [])
+
+
 class ShippedDefaultsTest(unittest.TestCase):
     """Relationships between the shipped tuning values that have to hold on any machine.
 

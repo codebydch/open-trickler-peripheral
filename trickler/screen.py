@@ -230,10 +230,7 @@ if __name__ == "__main__":
     parser.add_argument('--auto_mode', action='store_true')
     args = parser.parse_args()
     
-    config = configparser.ConfigParser()
-    config.optionxform = str
-    if args.config_file:
-        config.read(args.config_file)
+    config = helpers.load_config(args.config_file)
 
     # Order of priority is 1) command-line argument, 2) config file, 3) default.
     VERBOSE = DEFAULTS['verbose'] or config['general']['verbose']

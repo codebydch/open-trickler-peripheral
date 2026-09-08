@@ -6,7 +6,6 @@ https://github.com/codebydch/open-trickler-peripheral
 """
 import argparse
 import helpers
-import configparser
 import os
 import time
 import logging
@@ -28,10 +27,7 @@ parser.add_argument('config_file')
 parser.add_argument('--verbose', action='store_true', default=None)
 args = parser.parse_args()
     
-config = configparser.ConfigParser()
-config.optionxform = str
-if args.config_file:
-    config.read(args.config_file)
+config = helpers.load_config(args.config_file)
 
 # Order of priority is 1) command-line argument, 2) config file, 3) default.
 VERBOSE = DEFAULTS['verbose'] or config['general']['verbose']
