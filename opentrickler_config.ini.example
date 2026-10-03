@@ -179,6 +179,34 @@ learned_path = /var/lib/opentrickler/learned.json
 active =
 
 
+[calibration]
+# The calibration routine (Calibrate on the tuning page) runs trickler 1 on its own -- the
+# tricklers are the same hardware, and the powder measure never runs -- primes the tube,
+# finds the stall speed, then pulses at every combination of these speeds and lengths,
+# weighing each pulse the way a charge does. From that it picks final-approach settings for
+# the fastest charge that lands heavy no more than one time in four.
+# Pulse speeds to sweep, PWM %. Include the speeds you might run at.
+speeds = 25,30,45
+# Pulse lengths to sweep, seconds. The shortest should clear the motor spin-up; the
+# longest is a sensible cap for a single pulse.
+durations = 0.15,0.25,0.40
+# Pulses per speed-and-length cell. 10 is about two minutes for the grid above; the page
+# lets you choose more when you want tighter numbers.
+pulses_per_cell = 10
+# Grains kept clear of the container limit before the routine pauses for emptying: a
+# second of continuous running at 45% adds up to half a grain.
+capacity_margin = 0.5
+# Seconds of running without powder arriving before the routine gives up priming.
+prime_timeout = 20
+# Stall search: step size in PWM % and how many steps down from the lowest sweep speed.
+stall_step = 2
+stall_max_steps = 12
+# Simulated charges per candidate setting set, then per finalist. About a minute on a Pi
+# Zero 2 at these values.
+first_pass = 60
+second_pass = 300
+
+
 [servo]
 # This is the GPIO number of the pin, not the physical number of the pin
 servo_pin = 17
@@ -256,5 +284,8 @@ ACTIVE_PROFILE = active_profile
 DUMP_ERROR = dump_error
 TRICKLER_FAST_PULSE_RATE = trickler_fast_pulse_rate
 # The web app leaves requests for the trickler daemon here; the daemon takes and acts on
-# them between charges. Today: forgetting a learned feed rate.
+# them between charges: forgetting a learned feed rate, starting, continuing or aborting a
+# calibration.
 TRICKLER_COMMAND = trickler_command
+# Where the calibration routine reports its phase, progress, prompts and results.
+CALIBRATION_STATUS = calibration_status
