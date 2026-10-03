@@ -54,6 +54,12 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   the final approach. Most of the hard-won logic is here. `FeedModel` is what a powder has
   taught the machine, kept across charges; `run_pass` is one pass of the daemon's idle
   loop, where a Phase 2 calibration routine would sit beside `trickler_loop`.
+- `trickler/calibrate.py` -- the calibration routine: a `Calibration` the idle loop steps
+  (prime, stall search, sweep with container pauses, fit, recommend), started by the
+  `calibrate` command and steered by `calibrate_continue` / `calibrate_abort`; status under
+  the `CALIBRATION_STATUS` key. `trickler/powder_model.py` -- a powder as the sweep measured
+  it (`EmpiricalPowder`) and charges simulated against it through the real `PulseFeeder`
+  on a virtual clock (`ChargeSimulator`, `recommend`).
 - `trickler/helpers.py` -- `TRICKLER_SETTINGS` (tuning-page fields, defaults, ranges),
   `load_config`, `update_ini_section` (rewrites the ini without losing its comments).
 - `trickler/scales.py`, `motors.py` (servo through `lgpio.tx_servo`, not gpiozero),

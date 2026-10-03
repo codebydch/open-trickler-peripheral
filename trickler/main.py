@@ -377,12 +377,17 @@ class FeedModel:
 
 
 class FeedModels:
-    """One FeedModel per powder profile, for the life of the daemon."""
+    """One FeedModel per powder profile, for the life of the daemon.
+
+    Also where a calibration in progress lives: it is the daemon's knowledge of a powder
+    being gathered, and run_pass() needs one place to find it.
+    """
 
     def __init__(self, memcache=None, constants=None):
         self._memcache = memcache
         self._constants = constants
         self._models = {}
+        self.calibration = None
 
     def for_settings(self, settings):
         """The model for the profile these settings name, built on first use."""
@@ -1172,11 +1177,13 @@ def build_hardware(config, memcache, pidtune_logger):
     return Hardware(pid, trickler_motor1, trickler_motor2, servo_motor, scale, pidtune_logger)
 
 
-def handle_command(config, memcache, constants, scale, models):
+def handle_command(config, memcache, constants, hw, models):
     """Carries out a command the web app left in memcache, if there is one.
 
     The command is taken before it is acted on, so one that fails is not retried every
-    pass. Today there is one command; Phase 2's calibration routine is the next.
+    pass. `reset_learned` forgets a profile's rates; `calibrate` starts the calibration
+    routine, which then runs a step at a time from run_pass(); `calibrate_continue` and
+    `calibrate_abort` steer it.
     """
     key = helpers.command_key(constants)
     command = memcache.get(key)
@@ -1188,11 +1195,24 @@ def handle_command(config, memcache, constants, scale, models):
     name = command.get('command')
     if name == 'reset_learned':
         target_unit = memcache.get(constants.TARGET_UNIT.value)
-        settings = trickler_settings(config, memcache, constants, scale, target_unit)
+        settings = trickler_settings(config, memcache, constants, hw.scale, target_unit)
         profile = command.get('profile', settings.profile)
         models.reset(settings._replace(profile=profile))
         logging.info('Forgot the learned feed rates for %s.',
                      profile or 'the plain [trickler] settings')
+    elif name == 'calibrate':
+        import calibrate  # here, not at the top: calibrate imports this module
+        if models.calibration is not None and not models.calibration.finished:
+            logging.warning('A calibration is already running; ignoring the new request.')
+            return
+        logging.info('Starting calibration: %r', command)
+        models.calibration = calibrate.Calibration(config, memcache, constants, hw, command)
+    elif name == 'calibrate_continue':
+        if models.calibration is not None:
+            models.calibration.resume()
+    elif name == 'calibrate_abort':
+        if models.calibration is not None:
+            models.calibration.abort('Aborted from the page.')
     else:
         logging.warning('Ignoring a command the trickler does not know: %r', command)
 
@@ -1205,7 +1225,13 @@ def run_pass(config, memcache, constants, hw, models, last_status=None):
     STATUS_LOG_INTERVAL unless the target or auto mode moved. A charge, when one runs,
     runs to completion inside this call.
     """
-    handle_command(config, memcache, constants, hw.scale, models)
+    handle_command(config, memcache, constants, hw, models)
+
+    # A calibration in progress has the tricklers; nothing else runs until it is done.
+    calibration = models.calibration
+    if calibration is not None and not calibration.finished:
+        calibration.step()
+        return last_status
 
     # Update settings from memcache.
     auto_mode = memcache.get(constants.AUTO_MODE.value)
