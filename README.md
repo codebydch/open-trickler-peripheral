@@ -66,6 +66,12 @@ took and how long. `/app/history` shows the last hundred with the mean error, st
 deviation, and the share that landed inside ±0.02 gn — which is the number that answers
 whether the machine is accurate enough.
 
+Every **pulse** is recorded too — motor speed, how long it ran, what it delivered. From
+pulses at two different lengths the history page solves for the steady feed rate and the
+motor spin-up, which is the sum that set `pulse_dead_time` and used to be done by hand from
+the journal. The daemon writes the pulse file once per charge, not once per pulse, to spare
+the SD card.
+
 ## Pages
 
 | URL | What it is |
@@ -144,8 +150,9 @@ version added. The sections worth knowing:
   deciding where one hands over to the other), pulse timing, and the learned-rate seed.
   Setting `pulse_fast_pwm` equal to `pulse_pwm` gives single-speed pulsing back. All weights are in **grains** and converted
   automatically if the scale is set to grams.
-- `[history]` — where charges are recorded (`/var/lib/opentrickler/charges.csv` by
-  default, outside the repo so a `git pull` can't disturb it) and how many rows to keep.
+- `[history]` — where charges and pulses are recorded (`/var/lib/opentrickler/charges.csv`
+  and `pulses.csv` by default, outside the repo so a `git pull` can't disturb them) and
+  how many rows of each to keep.
 - `[profiles]` — the powder profile in use; each is a `[profile:Name]` section.
 - `[servo]` — powder measure travel and pulse widths, in **microseconds**. Set
   `servo_angle` from the servo page: work up until the measure gives a full drop, and

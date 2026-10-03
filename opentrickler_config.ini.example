@@ -145,6 +145,13 @@ enabled = True
 path = /var/lib/opentrickler/charges.csv
 # Oldest rows are dropped past this, so the file can't fill the SD card.
 max_rows = 500
+# One row per pulse of the final approach -- motor speed, how long it ran, what it
+# delivered. This is what the feed rate and the motor spin-up are fitted from, on the
+# history page, instead of by hand from the journal. Written once per charge, not once per
+# pulse, to spare the SD card. Defaults to pulses.csv beside the charge file.
+pulses_path = /var/lib/opentrickler/pulses.csv
+# About 300 charges' worth. A two-point fit needs a few dozen pulses at each length.
+pulses_max_rows = 5000
 
 
 [profiles]

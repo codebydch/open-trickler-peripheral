@@ -113,6 +113,8 @@ TricklerSettings = collections.namedtuple('TricklerSettings', (
     'profile',
     'history_path',
     'history_max_rows',
+    'pulses_path',
+    'pulses_max_rows',
 ))
 
 
@@ -210,6 +212,10 @@ class PulseFeeder:
                 self._fast_rate = max(float(learned_fast), MIN_PULSE_RATE)
         self.empty_pulses = 0
         self.pulses = 0
+        # One dict per pulse fired, written to the pulse file when the charge ends. This
+        # is the record the feed rate and spin-up are fitted from; the log line in
+        # pulse_phase is for watching, this is for measuring.
+        self.records = []
         # How far the guessed rate is discounted when sizing a probe. Doubles every time
         # a probe delivers too little to measure, because that is evidence the guess is
         # too high -- and a probe sized from a rate several times too high is far too
@@ -351,6 +357,16 @@ class PulseFeeder:
         time.sleep(self._settings.pulse_off_time)
         dose = self.settled_weight(self._settings.settle_min_time) - before
         self._learn(on_time, dose, fast)
+        self.records.append({
+            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+            'pwm': round(self._pulse_speed(fast) * 100, 1),
+            'on_time': round(on_time, 4),
+            'moving_time': round(self._moving_time(on_time), 4),
+            'remainder': remainder,
+            'dose': dose,
+            # The rate at the speed just used, after this pulse was folded in.
+            'rate': round(self.fast_rate if fast else self._rate, 4),
+        })
         return on_time, dose
 
     def _measured(self, fast):
@@ -521,6 +537,25 @@ def record_charge(settings, target_weight, final_weight, target_unit, outcome,
                         exc_info=True)
 
 
+def record_pulses(settings, records, target_unit):
+    """Writes one charge's pulses to the pulse file, in a single write.
+
+    Once per charge rather than once per pulse: the file is rewritten whole, and an SD
+    card does not want a dozen rewrites a charge. Never raises, for the same reason
+    record_charge() doesn't.
+    """
+    if not settings.pulses_path or not records:
+        return
+    unit = getattr(target_unit, 'name', target_unit)
+    try:
+        helpers.append_pulses(settings.pulses_path, [
+            dict(record, profile=settings.profile, unit=unit) for record in records
+        ], settings.pulses_max_rows)
+    except Exception:
+        logging.warning('Could not record the pulses to %s', settings.pulses_path,
+                        exc_info=True)
+
+
 def seed_memcache(memcache, values, overwrite=None):
     """Writes `values` into memcache, keeping anything that is already set.
 
@@ -556,7 +591,7 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
         profile = memcache.get(constants.ACTIVE_PROFILE.value) or ''
     if not profile and config.has_section('profiles'):
         profile = config['profiles'].get('active', '')
-    history = config['history'] if config.has_section('history') else EMPTY_SECTION
+    history = helpers.history_files(config)
     configured = config['trickler'] if config.has_section('trickler') else {}
     # Live overrides win, then the selected powder's profile, then the plain [trickler]
     # section, then the built-in defaults.
@@ -591,8 +626,10 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
         max_dump_attempts=int(float(section['max_dump_attempts'])),
         dump_retry_pause=float(section['dump_retry_pause']),
         profile=profile,
-        history_path=history.get('path', '') if history.getboolean('enabled', True) else '',
-        history_max_rows=history.getint('max_rows', 500))
+        history_path=history.charges,
+        history_max_rows=history.max_rows,
+        pulses_path=history.pulses,
+        pulses_max_rows=history.pulses_max_rows)
 
 
 def dump_powder(servo_motor, scale, settings):
@@ -861,6 +898,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
         record_charge(settings, target_weight, scale.weight, target_unit,
                       outcome or 'aborted', feeder.pulses, time.time() - started,
                       feeder.rate)
+        record_pulses(settings, feeder.records, target_unit)
     logging.info('Trickling process stopped.')
 
 

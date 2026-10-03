@@ -8,6 +8,7 @@ between `main.py` and `scales.py`, which a test using a stubbed scale object can
 import configparser
 import decimal
 import enum
+import os
 import random
 
 import motors
@@ -35,6 +36,10 @@ def load_config(history_path=None, profiles=None, active_profile=None,
     config['history']['enabled'] = 'True' if history_path else 'False'
     if history_path:
         config['history']['path'] = str(history_path)
+        # The shipped example names /var/lib/opentrickler/pulses.csv outright, so point
+        # the pulse file at the same scratch directory as the charges.
+        config['history']['pulses_path'] = os.path.join(
+            os.path.dirname(str(history_path)), 'pulses.csv')
 
     for name, settings in (profiles or {}).items():
         section = 'profile:%s' % name

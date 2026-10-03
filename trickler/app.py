@@ -122,11 +122,20 @@ def learned_rate(profile=None, fast=False):
 
 def history_path():
     """Where the trickler is writing charge history, or '' if it is switched off."""
-    if not config.has_section('history'):
-        return ''
-    if not config['history'].getboolean('enabled', True):
-        return ''
-    return config['history'].get('path', '')
+    return helpers.history_files(config).charges
+
+
+def pulses_path():
+    """Where the trickler is recording pulses, or '' if recording is switched off."""
+    return helpers.history_files(config).pulses
+
+
+def recorded_pulses(profile=''):
+    """Every recorded pulse, oldest first, for one profile or for all of them."""
+    rows = helpers.read_pulses(pulses_path()) if pulses_path() else []
+    if profile:
+        rows = [row for row in rows if row.get('profile') == profile]
+    return rows
 
 
 def render_config(errors=None, notice=None):
@@ -156,6 +165,8 @@ def history():
         'history.html',
         rows=list(reversed(rows))[:100],
         stats=helpers.charge_statistics(rows),
+        # The fit is per powder: a stick and a ball powder on one line is not a line.
+        fit=helpers.pulse_fit(recorded_pulses(wanted)),
         profiles=sorted({row.get('profile', '') for row in helpers.read_charges(history_path())} - {''}) if history_path() else [],
         selected=wanted,
         enabled=bool(history_path()))
@@ -166,6 +177,18 @@ def history_json():
     """The same data as /app/history, for anything that would rather have it raw."""
     rows = helpers.read_charges(history_path()) if history_path() else []
     return jsonify(rows=rows, stats=helpers.charge_statistics(rows))
+
+
+@app.route('/app/pulses.json')
+def pulses_json():
+    """The recorded pulses and the fit through them, for anything that wants the numbers.
+
+    `rows` is capped at the newest 500; the fit is over everything recorded for the
+    profile, since a fit over a sample of the record would be a different fit from the
+    page's.
+    """
+    rows = recorded_pulses(request.args.get('profile', ''))
+    return jsonify(rows=rows[-500:], fit=helpers.pulse_fit(rows))
 
 
 @app.route('/app/profile', methods=['POST'])

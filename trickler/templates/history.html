@@ -70,6 +70,9 @@
       tr.under td.error { color: #0b5ed7; }
       tr.incomplete { color: #868e96; font-style: italic; }
       .scroll { overflow-x: auto; }
+      h2 { font-size: 18px; margin: 20px 0 8px; }
+      .pulses p { font-size: 14px; color: #495057; line-height: 1.5; margin: 4px 0 10px; }
+      .pulses table { margin-bottom: 8px; }
       form { margin-bottom: 16px; font-size: 14px; }
       select, button {
         padding: 8px;
@@ -125,7 +128,41 @@
         </form>
       {% endif %}
 
+      {% if fit and fit.pulses %}
+        <div class="pulses" id="pulse-fit">
+          <h2>Pulses</h2>
+          <p>
+            {{ fit.pulses }} pulses recorded{% if selected %} for <strong>{{ selected }}</strong>{% endif %}.
+            {% if fit.rate %}
+              At {{ '%g'|format(fit.pwm) }}% drive the two busiest pulse lengths solve to a steady
+              feed of <strong>{{ '%.3f'|format(fit.rate) }} /s</strong> and a motor spin-up of
+              <strong>{{ '%.3f'|format(fit.dead_time) }} s</strong>. The spin-up is what
+              <code>pulse_dead_time</code> on the tuning page should be set to; the feed rate is
+              what the trickler learns for itself, so it is here to check against.
+            {% else %}
+              The rate and spin-up need pulses at two different lengths, at least ten of each at
+              one motor speed, before they can be solved. Cap the longest pulse differently for a
+              few charges to get the second length.
+            {% endif %}
+          </p>
+          <div class="scroll">
+            <table>
+              <tr><th>Drive</th><th>Pulse</th><th>Pulses</th><th>Mean dose</th></tr>
+              {% for bucket in fit.buckets %}
+                <tr>
+                  <td>{{ '%g'|format(bucket.pwm) }}%</td>
+                  <td>{{ '%.2f'|format(bucket.on_time) }} s</td>
+                  <td>{{ bucket.pulses }}</td>
+                  <td>{{ '%.4f'|format(bucket.mean_dose) }}</td>
+                </tr>
+              {% endfor %}
+            </table>
+          </div>
+        </div>
+      {% endif %}
+
       {% if rows %}
+        <h2>Charges</h2>
         <div class="scroll">
           <table>
             <tr>
@@ -153,6 +190,7 @@
         <a href="/app/config/">Tuning</a> &middot;
         <a href="/app/">Control Panel</a> &middot;
         <a href="/app/history.json">Raw data</a> &middot;
+        <a href="/app/pulses.json">Raw pulses</a> &middot;
         <a href="/">All pages</a>
       </p>
     </div>

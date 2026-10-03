@@ -72,6 +72,127 @@ class AppendAndReadTest(TempPathTest):
         self.assertTrue(os.stat(self.path).st_mode & 0o044)
 
 
+class PulseRecordTest(TempPathTest):
+    """One row per pulse, through the same writer as the charges."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = os.path.join(self.directory, 'pulses.csv')
+
+    @staticmethod
+    def pulse(on_time='0.2', dose='0.02', pwm='25', profile=''):
+        return {
+            'timestamp': '2026-09-01T10:00:00', 'profile': profile, 'pwm': pwm,
+            'on_time': on_time, 'moving_time': '0.08', 'remainder': '0.30',
+            'dose': dose, 'rate': '0.217', 'unit': 'GRAINS',
+        }
+
+    def test_round_trip(self):
+        helpers.append_pulses(self.path, [self.pulse(), self.pulse(dose='0.00')])
+        rows = helpers.read_pulses(self.path)
+        self.assertEqual([r['dose'] for r in rows], ['0.02', '0.00'])
+        self.assertEqual(tuple(rows[0]), helpers.PULSE_COLUMNS)
+
+    def test_rotation_keeps_the_newest(self):
+        for dose in ('0.01', '0.02', '0.03'):
+            helpers.append_pulses(self.path, [self.pulse(dose=dose)], max_rows=2)
+        self.assertEqual([r['dose'] for r in helpers.read_pulses(self.path)],
+                         ['0.02', '0.03'])
+
+    def test_a_missing_file_reads_as_no_pulses(self):
+        self.assertEqual(helpers.read_pulses(self.path), [])
+
+
+class PulseFitTest(unittest.TestCase):
+    """The two-point solve for feed rate and spin-up, from the record instead of by hand."""
+
+    @staticmethod
+    def pulses(count, on_time, dose, pwm='25'):
+        return [PulseRecordTest.pulse(on_time=str(on_time), dose=str(dose), pwm=pwm)
+                for _ in range(count)]
+
+    def bench(self):
+        # The bench's own numbers: 120 pulses at 0.2 s averaging 0.0178 gn, 32 at 0.4 s
+        # averaging 0.0613, which the owner solved by hand to 0.217 gn/s and 0.118 s.
+        return self.pulses(120, 0.2, 0.0178) + self.pulses(32, 0.4, 0.0613)
+
+    def test_reproduces_the_bench_fit(self):
+        fit = helpers.pulse_fit(self.bench())
+        self.assertAlmostEqual(fit['rate'], 0.2175, delta=0.0005)
+        self.assertAlmostEqual(fit['dead_time'], 0.118, delta=0.001)
+        self.assertEqual(fit['pulses'], 152)
+        self.assertEqual(fit['pwm'], 25.0)
+
+    def test_one_length_is_not_a_fit(self):
+        fit = helpers.pulse_fit(self.pulses(120, 0.2, 0.0178))
+        self.assertIsNone(fit['rate'])
+        self.assertEqual(len(fit['buckets']), 1)
+
+    def test_a_handful_of_pulses_at_the_second_length_is_not_enough(self):
+        """Powder lands in whole grains, so the mean of three pulses is mostly chance."""
+        fit = helpers.pulse_fit(self.pulses(120, 0.2, 0.0178) + self.pulses(3, 0.4, 0.0613))
+        self.assertIsNone(fit['rate'])
+        self.assertEqual(fit['pulses'], 123, 'the small group is still listed')
+
+    def test_only_the_busiest_speed_is_fitted(self):
+        """Fast and fine pulses on one line would be a line through two machines."""
+        rows = self.bench() + self.pulses(40, 0.2, 0.05, pwm='45') + self.pulses(40, 0.4, 0.15, pwm='45')
+        fit = helpers.pulse_fit(rows)
+        self.assertEqual(fit['pwm'], 25.0)
+        self.assertAlmostEqual(fit['rate'], 0.2175, delta=0.0005)
+
+    def test_longer_pulses_that_delivered_less_are_noise_not_a_line(self):
+        fit = helpers.pulse_fit(self.pulses(50, 0.2, 0.04) + self.pulses(50, 0.4, 0.02))
+        self.assertIsNone(fit['rate'])
+        self.assertIsNone(fit['dead_time'])
+
+    def test_unparseable_rows_are_skipped_not_fatal(self):
+        rows = self.bench() + [{'pwm': '25', 'on_time': 'junk', 'dose': '0.02'}, {}]
+        self.assertAlmostEqual(helpers.pulse_fit(rows)['rate'], 0.2175, delta=0.0005)
+
+    def test_no_pulses(self):
+        fit = helpers.pulse_fit([])
+        self.assertEqual(fit['pulses'], 0)
+        self.assertIsNone(fit['rate'])
+
+
+class HistoryFilesTest(unittest.TestCase):
+    """The daemon and the web app must agree on where the files are."""
+
+    @staticmethod
+    def config(**history):
+        config = fakes.load_config()
+        config.remove_section('history')
+        if history is not None:
+            config.add_section('history')
+            for key, value in history.items():
+                config['history'][key] = value
+        return config
+
+    def test_the_pulse_file_defaults_to_beside_the_charge_file(self):
+        """A config written before pulses_path existed records pulses from the first
+        charge after an update, rather than silently not at all."""
+        files = helpers.history_files(self.config(path='/var/lib/opentrickler/charges.csv'))
+        self.assertEqual(files.pulses, '/var/lib/opentrickler/pulses.csv')
+        self.assertEqual(files.max_rows, 500)
+        self.assertEqual(files.pulses_max_rows, 5000)
+
+    def test_an_explicit_pulse_path_is_used(self):
+        files = helpers.history_files(self.config(
+            path='/a/charges.csv', pulses_path='/b/p.csv', pulses_max_rows='99'))
+        self.assertEqual(files.pulses, '/b/p.csv')
+        self.assertEqual(files.pulses_max_rows, 99)
+
+    def test_switched_off_means_no_files_at_all(self):
+        files = helpers.history_files(self.config(enabled='False', path='/a/charges.csv'))
+        self.assertEqual(files, ('', '', 0, 0))
+
+    def test_no_section_means_no_files(self):
+        config = fakes.load_config()
+        config.remove_section('history')
+        self.assertEqual(helpers.history_files(config).charges, '')
+
+
 class StatisticsTest(unittest.TestCase):
 
     def rows(self, errors, outcome='complete'):
@@ -149,6 +270,56 @@ class RecordingTest(TempPathTest):
                 run_charge(machine, D('45.00'), config=config)
         # The charge still finished on target.
         self.assertLess(abs(machine.true_weight - D('45.00')), D('0.05'))
+
+    def test_every_pulse_is_recorded(self):
+        """The pulse file is what the rate and spin-up are fitted from, so it has to hold
+        exactly the pulses that were fired, with what each one did."""
+        machine = fakes.SimulatedMachine('44.50')
+        config = fakes.load_config(history_path=self.path)
+        run_charge(machine, D('45.00'), config=config)
+
+        charge = helpers.read_charges(self.path)[0]
+        pulses = helpers.read_pulses(os.path.join(self.directory, 'pulses.csv'))
+        self.assertEqual(len(pulses), int(charge['pulses']))
+        self.assertGreater(len(pulses), 0)
+        for pulse in pulses:
+            self.assertEqual(tuple(pulse), helpers.PULSE_COLUMNS)
+            self.assertEqual(pulse['unit'], 'GRAINS')
+            self.assertGreater(float(pulse['on_time']), float(pulse['moving_time']))
+            self.assertGreater(float(pulse['rate']), 0)
+            # What the pulse delivered is what the scale showed, in whole divisions.
+            divisions = float(pulse['dose']) / 0.02
+            self.assertAlmostEqual(divisions, round(divisions), places=6)
+        # Pulses are aimed at a shrinking remainder, so the record runs downward.
+        remainders = [float(p['remainder']) for p in pulses]
+        self.assertGreater(remainders[0], remainders[-1])
+
+    def test_pulses_are_written_once_per_charge(self):
+        """The file is rewritten whole, and an SD card does not want that per pulse."""
+        machine = fakes.SimulatedMachine('44.50')
+        config = fakes.load_config(history_path=self.path)
+        with mock.patch.object(helpers, 'append_pulses',
+                               wraps=helpers.append_pulses) as append:
+            run_charge(machine, D('45.00'), config=config)
+        self.assertEqual(append.call_count, 1)
+
+    def test_pulses_are_off_when_history_is_off(self):
+        config = fakes.load_config()
+        scale = mock.Mock()
+        scale.Units = scales.ANDScale.Units
+        settings = main.trickler_settings(
+            config, None, None, scale, scales.ANDScale.Units.GRAINS)
+        self.assertEqual(settings.pulses_path, '')
+
+    def test_an_unwritable_pulse_file_does_not_stop_the_charge(self):
+        machine = fakes.SimulatedMachine('44.50')
+        config = fakes.load_config(history_path=self.path)
+        with mock.patch.object(helpers, 'append_pulses',
+                               side_effect=OSError('read-only file system')):
+            with self.assertLogs(level='WARNING'):
+                run_charge(machine, D('45.00'), config=config)
+        self.assertLess(abs(machine.true_weight - D('45.00')), D('0.05'))
+        self.assertTrue(helpers.read_charges(self.path), 'the charge itself is still recorded')
 
 
 class ProfileTest(unittest.TestCase):

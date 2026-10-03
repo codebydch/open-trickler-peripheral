@@ -323,19 +323,63 @@ HISTORY_COLUMNS = (
 )
 
 
-def append_charge(path, row, max_rows=500):
-    """Appends one charge to the history file, trimming the oldest rows past `max_rows`.
+# One row per pulse of the final approach: the raw material the feed rate and the motor
+# spin-up are fitted from. Same writer and reader as the charges, and the same reason for
+# keeping it -- every calibration figure so far was worked out by hand from pasted log
+# lines, and the daemon had every value all along.
+PULSE_COLUMNS = (
+    'timestamp',
+    'profile',
+    'pwm',
+    'on_time',
+    'moving_time',
+    'remainder',
+    'dose',
+    'rate',
+    'unit',
+)
 
-    Creates the file and its directory on first use. Raises OSError if the file cannot be
-    written; callers on the trickler side should log and carry on rather than let a full
-    SD card stop someone reloading.
+
+HistoryFiles = collections.namedtuple(
+    'HistoryFiles', ('charges', 'pulses', 'max_rows', 'pulses_max_rows'))
+
+
+def history_files(config):
+    """Where the daemon records charges and pulses, read from [history].
+
+    Both paths are '' when recording is switched off. The pulse file defaults to
+    `pulses.csv` beside the charge file, so a config written before `pulses_path` existed
+    records pulses from the first charge after an update rather than silently not at all.
+    The daemon and the web app both go through here, so they can't disagree about where
+    the files are.
+    """
+    section = (config['history'] if config.has_section('history')
+               else configparser.ConfigParser()['DEFAULT'])
+    if not section.getboolean('enabled', True):
+        return HistoryFiles('', '', 0, 0)
+    charges = section.get('path', '')
+    pulses = section.get('pulses_path', '')
+    if not pulses and charges:
+        pulses = os.path.join(os.path.dirname(charges), 'pulses.csv')
+    return HistoryFiles(charges, pulses, section.getint('max_rows', 500),
+                        section.getint('pulses_max_rows', 5000))
+
+
+def append_rows(path, new_rows, columns, max_rows):
+    """Appends rows to a CSV file, trimming the oldest past `max_rows`.
+
+    Creates the file and its directory on first use, and replaces the file atomically so
+    a failure part way through can't leave a half-written record. Raises OSError if the
+    file cannot be written; callers on the trickler side should log and carry on rather
+    than let a full SD card stop someone reloading.
     """
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
 
-    rows = read_charges(path)
-    rows.append({column: str(row.get(column, '')) for column in HISTORY_COLUMNS})
+    rows = read_rows(path)
+    rows.extend({column: str(row.get(column, '')) for column in columns}
+                for row in new_rows)
     # Keep the newest max_rows so the file can't grow without bound on an SD card.
     if max_rows and len(rows) > max_rows:
         rows = rows[-max_rows:]
@@ -344,7 +388,7 @@ def append_charge(path, row, max_rows=500):
         'w', encoding='utf-8', dir=directory or '.', delete=False, newline='')
     try:
         with handle:
-            writer = csv.DictWriter(handle, fieldnames=HISTORY_COLUMNS)
+            writer = csv.DictWriter(handle, fieldnames=columns)
             writer.writeheader()
             writer.writerows(rows)
         os.replace(handle.name, path)
@@ -355,10 +399,10 @@ def append_charge(path, row, max_rows=500):
         raise
 
 
-def read_charges(path):
-    """Returns every recorded charge as a list of dicts, oldest first.
+def read_rows(path):
+    """Returns every row of a record file as a list of dicts, oldest first.
 
-    A missing or unreadable file reads as no history rather than an error: the page
+    A missing or unreadable file reads as no record rather than an error: the page
     should say "nothing recorded yet", not fail.
     """
     try:
@@ -366,8 +410,79 @@ def read_charges(path):
             return [dict(row) for row in csv.DictReader(handle)
                     if row.get('timestamp')]
     except (OSError, csv.Error):
-        logging.debug('No readable charge history at %s', path, exc_info=True)
+        logging.debug('No readable record at %s', path, exc_info=True)
         return []
+
+
+def append_charge(path, row, max_rows=500):
+    """Appends one charge to the history file. See append_rows()."""
+    append_rows(path, [row], HISTORY_COLUMNS, max_rows)
+
+
+def read_charges(path):
+    """Every recorded charge, oldest first. See read_rows()."""
+    return read_rows(path)
+
+
+def append_pulses(path, rows, max_rows=5000):
+    """Appends one charge's worth of pulses to the pulse file. See append_rows()."""
+    append_rows(path, rows, PULSE_COLUMNS, max_rows)
+
+
+def read_pulses(path):
+    """Every recorded pulse, oldest first. See read_rows()."""
+    return read_rows(path)
+
+
+def pulse_fit(rows, min_per_bucket=10):
+    """Fits the feed rate and the motor spin-up to the recorded pulses.
+
+    A pulse delivers rate x (on_time - spin_up), so two batches of pulses at different
+    lengths solve for both: the rate is the difference in mean dose over the difference
+    in length, and the spin-up is where a line through the two means crosses zero. This
+    is the sum the bench did by hand -- 120 pulses at 0.2 s averaging 0.0178 gn and 32 at
+    0.4 s averaging 0.0613 gave 0.217 gn/s and 0.118 s -- done from the record instead.
+
+    Pulses are grouped by motor speed and length (to 0.01 s). Only the speed with the most
+    pulses is fitted, and only from groups holding at least `min_per_bucket` pulses:
+    powder lands in whole grains, so a mean over a handful of pulses is mostly chance.
+    Returns a dict with every group and, when two qualify, `rate` and `dead_time`; both
+    are None otherwise, and None too if the longer pulses delivered less, which is noise
+    rather than a line.
+    """
+    groups = {}
+    for row in rows:
+        try:
+            key = (float(row.get('pwm', 0)), round(float(row['on_time']), 2))
+            dose = float(row['dose'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        total, count = groups.get(key, (0.0, 0))
+        groups[key] = (total + dose, count + 1)
+
+    buckets = [{'pwm': pwm, 'on_time': on_time, 'pulses': count, 'mean_dose': total / count}
+               for (pwm, on_time), (total, count) in sorted(groups.items())]
+    fit = {'pulses': sum(b['pulses'] for b in buckets), 'buckets': buckets,
+           'pwm': None, 'rate': None, 'dead_time': None}
+    if not buckets:
+        return fit
+
+    by_speed = {}
+    for bucket in buckets:
+        by_speed.setdefault(bucket['pwm'], []).append(bucket)
+    pwm, candidates = max(by_speed.items(), key=lambda item: sum(b['pulses'] for b in item[1]))
+    fit['pwm'] = pwm
+    usable = sorted((b for b in candidates if b['pulses'] >= min_per_bucket),
+                    key=lambda b: b['pulses'], reverse=True)[:2]
+    if len(usable) < 2:
+        return fit
+    short, long_ = sorted(usable, key=lambda b: b['on_time'])
+    if long_['on_time'] <= short['on_time'] or long_['mean_dose'] <= short['mean_dose']:
+        return fit
+    rate = (long_['mean_dose'] - short['mean_dose']) / (long_['on_time'] - short['on_time'])
+    fit['rate'] = rate
+    fit['dead_time'] = short['on_time'] - short['mean_dose'] / rate
+    return fit
 
 
 def charge_statistics(rows, tolerance=0.02):
