@@ -428,19 +428,20 @@ class Calibration:
             rows = [{'pwm': speed, 'on_time': duration, 'dose': dose}
                     for (s, duration), values in self.cells.items() if s == speed
                     for dose, _ in values]
-            fit = helpers.pulse_fit(rows, min_per_bucket=max(3, self.cal.pulses_per_cell // 2))
-            if fit['rate']:
-                rates[speed] = fit['rate']
-                dead_times[speed] = fit['dead_time']
-            else:
-                # Not enough of a line to solve: fall back to dose over moving time at
-                # the configured spin-up.
-                moving = [max(duration - self.settings.pulse_dead_time, 0.01) * len(values)
-                          for (s, duration), values in self.cells.items() if s == speed]
-                delivered = [sum(d for d, _ in values)
-                             for (s, _d), values in self.cells.items() if s == speed]
-                rates[speed] = max(sum(delivered) / max(sum(moving), 1e-6), main.MIN_PULSE_RATE)
-                dead_times[speed] = self.settings.pulse_dead_time
+            # The spin-up comes from the two-point solve across pulse lengths, when there
+            # are enough pulses for the two means to be a line and not two lumps.
+            fit = helpers.pulse_fit(rows, min_per_bucket=max(10, self.cal.pulses_per_cell))
+            dead_time = fit['dead_time'] if fit['rate'] else self.settings.pulse_dead_time
+            dead_time = min(max(dead_time, 0.0), 0.3)
+            dead_times[speed] = dead_time
+            # The rate is what the feeder itself learns: everything delivered over all
+            # the time the motor was moving, which lumps cannot invert the way a
+            # difference of two means can.
+            moving = sum(max(duration - dead_time, 0.01) * len(values)
+                         for (s, duration), values in self.cells.items() if s == speed)
+            delivered = sum(dose for (s, _d), values in self.cells.items() if s == speed
+                            for dose, _ in values)
+            rates[speed] = max(delivered / max(moving, 1e-6), main.MIN_PULSE_RATE)
         self.results = {
             'profile': self.settings.profile,
             'stall_pwm': self.stall_pwm,
