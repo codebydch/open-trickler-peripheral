@@ -56,15 +56,22 @@ ordinary and does not mean the hopper is empty; and inside a few divisions of ta
 feeder stops calculating doses that cannot exist and simply places one grain at a time.
 ±0.02 gn is the floor, and no setting gets below it.
 
-That learned rate is kept between charges and shown on the tuning page, scoped to the
-selected **powder profile** — so switching from a stick powder to a ball powder switches
-the estimate rather than blending the two into an average that fits neither. Profiles are
+That learned rate is kept between charges — and across reboots, in `learned.json` beside
+the charge history — and shown on the tuning page, scoped to the selected **powder
+profile**, so switching from a stick powder to a ball powder switches the estimate rather
+than blending the two into an average that fits neither. Profiles are
 created from the tuning page and stored as `[profile:Name]` sections in the config file.
 
 Every charge is recorded: target, what it actually weighed, the error, how many pulses it
 took and how long. `/app/history` shows the last hundred with the mean error, standard
 deviation, and the share that landed inside ±0.02 gn — which is the number that answers
 whether the machine is accurate enough.
+
+Every **pulse** is recorded too — motor speed, how long it ran, what it delivered. From
+pulses at two different lengths the history page solves for the steady feed rate and the
+motor spin-up, which is the sum that set `pulse_dead_time` and used to be done by hand from
+the journal. The daemon writes the pulse file once per charge, not once per pulse, to spare
+the SD card.
 
 ## Pages
 
@@ -144,8 +151,9 @@ version added. The sections worth knowing:
   deciding where one hands over to the other), pulse timing, and the learned-rate seed.
   Setting `pulse_fast_pwm` equal to `pulse_pwm` gives single-speed pulsing back. All weights are in **grains** and converted
   automatically if the scale is set to grams.
-- `[history]` — where charges are recorded (`/var/lib/opentrickler/charges.csv` by
-  default, outside the repo so a `git pull` can't disturb it) and how many rows to keep.
+- `[history]` — where charges and pulses are recorded and the learned feed rates kept
+  (`/var/lib/opentrickler/charges.csv`, `pulses.csv` and `learned.json` by default,
+  outside the repo so a `git pull` can't disturb them) and how many rows to keep.
 - `[profiles]` — the powder profile in use; each is a `[profile:Name]` section.
 - `[servo]` — powder measure travel and pulse widths, in **microseconds**. Set
   `servo_angle` from the servo page: work up until the measure gives a full drop, and
@@ -208,10 +216,19 @@ other, and a mismatched set fails in ways that are hard to read.
 
 ## Developer setup
 
+On a Pi, where the full requirements install:
+
 ```bash
 sudo apt install memcached
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-to-freeze.txt
+```
+
+Anywhere else, install only what the tests import -- `requirements-to-freeze.txt` is the
+Pi's list, C extensions included:
+
+```bash
+python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
 ```
 
 Run the tests from the repository root:
@@ -225,8 +242,8 @@ a simulated machine, so they run anywhere and cover the parts that are awkward t
 on the bench: frame parsing, motor clamping, every exit path from a charge, and whether a
 charge actually lands on target. `tests/fakes.py` holds the simulated hardware.
 
-Run them on **Python 3.13** if you can, which is what Raspberry Pi OS Trixie ships. A
-passing run on an older interpreter is not proof: stacking `@classmethod` on `@property`
+Run them on **Python 3.13**, which is what Raspberry Pi OS Trixie ships and what CI runs.
+A passing run on an older interpreter is not proof: stacking `@classmethod` on `@property`
 worked until 3.13 removed it, and the scales module hit that on Trixie and nowhere else.
 
 The screen is covered too, by stubbing the two Pi-only modules `screen.py` imports and

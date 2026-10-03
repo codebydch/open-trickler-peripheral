@@ -92,6 +92,9 @@ class TuningPageTest(AppTestCase):
         self.memcache['trickler_pulse_rate'] = 0.5
         self.client.post('/app/config/update', data={'reset_learned': '1'})
         self.assertNotIn('trickler_pulse_rate', self.memcache)
+        # The copy that survives a reboot is the daemon's, so it is asked to forget it.
+        self.assertEqual(self.memcache['trickler_command'],
+                         {'command': 'reset_learned', 'profile': ''})
 
 
 class StatusTest(AppTestCase):
@@ -143,8 +146,9 @@ class HistoryPageTest(AppTestCase):
         super().setUp()
         self.directory = tempfile.mkdtemp()
         self.path = os.path.join(self.directory, 'charges.csv')
-        helpers.update_ini_section(self.ini, 'history',
-                                   {'enabled': 'True', 'path': self.path})
+        self.pulses = os.path.join(self.directory, 'pulses.csv')
+        helpers.update_ini_section(self.ini, 'history', {
+            'enabled': 'True', 'path': self.path, 'pulses_path': self.pulses})
         app.config.read(self.ini)
 
     def tearDown(self):
@@ -180,6 +184,43 @@ class HistoryPageTest(AppTestCase):
         payload = json.loads(self.client.get('/app/history.json').get_data(as_text=True))
         self.assertEqual(len(payload['rows']), 1)
         self.assertEqual(payload['stats']['count'], 1)
+
+    def record_pulses(self, count, on_time, dose, profile=''):
+        helpers.append_pulses(self.pulses, [{
+            'timestamp': '2026-09-01T10:00:00', 'profile': profile, 'pwm': '25',
+            'on_time': str(on_time), 'moving_time': str(on_time - 0.12),
+            'remainder': '0.30', 'dose': str(dose), 'rate': '0.2', 'unit': 'GRAINS',
+        } for _ in range(count)])
+
+    def test_the_page_shows_the_pulse_fit(self):
+        # 0.02 gn at 0.2 s and 0.06 at 0.4 s: 0.2 gn/s, and a spin-up of 0.1 s.
+        self.record_pulses(12, 0.2, 0.02)
+        self.record_pulses(12, 0.4, 0.06)
+        body = self.client.get('/app/history').get_data(as_text=True)
+        self.assertIn('id="pulse-fit"', body)
+        self.assertIn('0.200', body)
+        self.assertIn('0.100', body)
+
+    def test_the_page_says_what_is_missing_for_a_fit(self):
+        self.record_pulses(12, 0.2, 0.02)
+        body = self.client.get('/app/history').get_data(as_text=True)
+        self.assertIn('id="pulse-fit"', body)
+        self.assertIn('two different lengths', body)
+
+    def test_no_pulses_means_no_pulse_section(self):
+        body = self.client.get('/app/history').get_data(as_text=True)
+        self.assertNotIn('id="pulse-fit"', body)
+
+    def test_the_fit_is_per_profile(self):
+        self.record_pulses(12, 0.2, 0.02, profile='Varget')
+        self.record_pulses(12, 0.4, 0.06, profile='Varget')
+        self.record_pulses(12, 0.4, 0.30, profile='H4350')
+        payload = json.loads(
+            self.client.get('/app/pulses.json?profile=Varget').get_data(as_text=True))
+        self.assertEqual(len(payload['rows']), 24)
+        self.assertAlmostEqual(payload['fit']['rate'], 0.2, places=6)
+        everything = json.loads(self.client.get('/app/pulses.json').get_data(as_text=True))
+        self.assertEqual(len(everything['rows']), 36)
 
 
 class ProfilePageTest(AppTestCase):

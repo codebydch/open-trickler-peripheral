@@ -42,7 +42,9 @@ defaults, so they keep testing the same thing when a default moves.
 ## Layout
 
 - `trickler/main.py` -- the charge loop: continuous PID trickling, then `PulseFeeder` for
-  the final approach. Most of the hard-won logic is here.
+  the final approach. Most of the hard-won logic is here. `FeedModel` is what a powder has
+  taught the machine, kept across charges; `run_pass` is one pass of the daemon's idle
+  loop, where a Phase 2 calibration routine would sit beside `trickler_loop`.
 - `trickler/helpers.py` -- `TRICKLER_SETTINGS` (tuning-page fields, defaults, ranges),
   `load_config`, `update_ini_section` (rewrites the ini without losing its comments).
 - `trickler/scales.py`, `motors.py` (servo through `lgpio.tx_servo`, not gpiozero),
@@ -75,10 +77,11 @@ defaults, so they keep testing the same thing when a default moves.
   trickled up; a heavy one has to be dumped. The owner's call.
 - **`pulse_on_time = 0.4`** -- at 0.2 the cap bound nearly every pulse; past 0.4 the gain
   flattens and clumps start to overshoot.
-- **Two-speed pulsing is off** (`pulse_fast_pwm` = `pulse_pwm`). Tested: 45% drive gave
-  about 1.1x the powder per pulse of 30%, not the 2.5x drive suggests, and the fast pulses
-  load the tube so the first fine pulse bursts. Note the shipped example still has 45/25;
-  the owner runs 30/30 and is changing such values by hand.
+- **Two-speed pulsing was tested and found not to pay**: 45% drive gave about 1.1x the
+  powder per pulse of 30%, not the 2.5x drive suggests, and the fast pulses load the tube
+  so the first fine pulse bursts. The code stays in, dormant when `pulse_fast_pwm` =
+  `pulse_pwm`. The owner is currently running the shipped 25/45 and changes such values by
+  hand on the tuning page; don't move the shipped defaults without asking.
 - An "E" on the scale when the pan is lifted was a scale fault, fixed by resetting the
   scale -- not code.
 
@@ -93,8 +96,16 @@ defaults, so they keep testing the same thing when a default moves.
   config file's value never applied.
 - `done()` must not use `min_dose` until a rate has been measured -- a high seed rate
   made it declare charges complete before firing anything.
-- Learned rates live in memcache per profile and survive daemon restarts. The tuning
-  page's "Clear learned feed rate" resets them.
+- Stopping a grain light (`cutoff_weight = 0.02`) left the pan reading under target, and
+  the idle loop's "weight < target" started a new charge on it every pass -- each complete
+  before its first pulse and each recorded, 28 in 30 simulated passes. `run_pass` now
+  requires the remainder to exceed `cutoff_weight`, the same rule the charge finishes on.
+- Learned rates live in a `FeedModel` per profile (`main.py`), saved to `learned.json`
+  beside the charge history so they survive a reboot, and mirrored to memcache for the
+  tuning page. "Clear learned feed rate" deletes the memcache copy and sends the daemon a
+  `reset_learned` command through the `TRICKLER_COMMAND` memcache key, which is also where
+  Phase 2's "calibrate" will go. Every pulse is in `pulses.csv`; `/app/history` fits rate
+  and spin-up from it, so bench evidence no longer has to be pasted from the journal.
 - Reading pulse logs: `remainder: R ... scale: W ... pulsed T s -> D (rate X/s)` -- R is
   before the pulse, W after, and X is the **fine** rate only. Fast-pulse learning isn't
   logged.
@@ -112,8 +123,10 @@ The next piece of work. What's known going in:
   10 s of running to fill; a full-power run fills the tube while pulsing lays the grains
   out, so delivery starts slow and then settles.
 - **Known weakness to fix there:** each charge's rate window starts empty
-  (`PulseFeeder` is built per charge), so one burst on a short pulse can swing the stored
-  rate a long way. Persisting the window, or bounding a single update, are the candidates.
+  (`FeedModel.new_charge` clears it), so one burst on a short pulse can swing the stored
+  rate a long way -- the logged 0.302 -> 0.665 is exactly one 0.066 s pulse's 0.08 gn
+  blended at `PULSE_RATE_LEARN`. Persisting the window (the model already outlives the
+  charge, so that is a one-line change) or bounding a single update are the candidates.
 - **Endgame stalls:** a pulse sized for exactly one grain delivers nothing about half the
   time. Aiming the last pulses at `remainder - cutoff_weight` is safe and untested.
 - Untested lever: `settle_min_time` (0.3 s of each ~0.8 s pulse cycle). Too low and a
