@@ -1,5 +1,6 @@
-"""Settings validation and the in-place config file rewrite."""
+"""Settings validation, the in-place config file rewrite, and the log level."""
 import configparser
+import logging
 import os
 import shutil
 import tempfile
@@ -204,3 +205,45 @@ class ShippedDefaultsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class LogLevelTest(unittest.TestCase):
+    """`verbose = False` in the ini has to mean INFO.
+
+    It used to be read as the string 'False', which is true, so every daemon ran at DEBUG
+    whatever the file said. The trickler then logged every scale frame, twenty a second,
+    and journald rotated the lines worth keeping out of the journal within minutes.
+    """
+
+    @staticmethod
+    def config(verbose=None):
+        config = configparser.ConfigParser()
+        config.add_section('general')
+        if verbose is not None:
+            config['general']['verbose'] = verbose
+        return config
+
+    def test_false_in_the_file_means_info(self):
+        for value in ('False', 'false', 'no', '0'):
+            with self.subTest(value=value):
+                self.assertEqual(helpers.log_level(self.config(value)), logging.INFO)
+
+    def test_true_in_the_file_means_debug(self):
+        for value in ('True', 'yes', '1'):
+            with self.subTest(value=value):
+                self.assertEqual(helpers.log_level(self.config(value)), logging.DEBUG)
+
+    def test_nothing_in_the_file_means_info(self):
+        self.assertEqual(helpers.log_level(self.config()), logging.INFO)
+        self.assertEqual(helpers.log_level(configparser.ConfigParser()), logging.INFO)
+
+    def test_the_command_line_wins(self):
+        self.assertEqual(helpers.log_level(self.config('False'), True), logging.DEBUG)
+        self.assertEqual(helpers.log_level(self.config('True'), False), logging.INFO)
+
+    def test_junk_means_info_and_says_so(self):
+        with self.assertLogs(level='WARNING'):
+            self.assertEqual(helpers.log_level(self.config('sometimes')), logging.INFO)
+
+    def test_the_shipped_config_runs_at_info(self):
+        self.assertEqual(helpers.log_level(helpers.load_config(CONFIG_PATH)), logging.INFO)

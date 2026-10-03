@@ -93,7 +93,10 @@ defaults, so they keep testing the same thing when a default moves.
 - `configparser.read()` ignores a missing file and returns an empty config. Always load
   through `helpers.load_config`.
 - `--verbose` uses `default=None`; with `store_true` alone it's `False` when absent and the
-  config file's value never applied.
+  config file's value never applied. And the config value has to be read with
+  `getboolean`: `config['general']['verbose']` is the *string* `'False'`, which is true, so
+  every daemon ran at DEBUG whatever the ini said and journald rotated the charge lines out
+  within minutes. `helpers.log_level` is the one place the level is decided now.
 - `done()` must not use `min_dose` until a rate has been measured -- a high seed rate
   made it declare charges complete before firing anything.
 - Stopping a grain light (`cutoff_weight = 0.02`) left the pan reading under target, and

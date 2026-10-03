@@ -246,11 +246,6 @@ if __name__ == '__main__':
     import helpers
 
 
-    # Default argument values.
-    DEFAULTS = dict(
-        verbose = False
-    )
-
     parser = argparse.ArgumentParser(description='Test motors.')
     parser.add_argument('config_file')
     # default=None so "not given" can be told from "given as false": with
@@ -272,13 +267,12 @@ if __name__ == '__main__':
     # Parse the config file.
     config = helpers.load_config(args.config_file)
 
+    # --verbose on the command line wins, else the config file decides.
+    helpers.setup_logging(helpers.log_level(config, args.verbose))
+
     # Order of priority is 1) command-line argument, 2) config file, 3) default.
     kwargs = {}
-    VERBOSE = DEFAULTS['verbose'] or config['general']['verbose']
     motor = 1
-    if args.verbose is not None:
-        kwargs['verbose'] = args.verbose
-        VERBOSE = args.verbose
     if args.trickler_motor is not None:
         kwargs['motor'] = args.trickler_motor
         motor = args.trickler_motor
@@ -300,12 +294,7 @@ if __name__ == '__main__':
         kwargs['min_pulse_width'] = args.min_pulse_width
     if args.max_pulse_width is not None:
         kwargs['max_pulse_width'] = args.max_pulse_width
-        
-    # Configure Python logging.
-    LOG_LEVEL = logging.INFO
-    if VERBOSE:
-        LOG_LEVEL = logging.DEBUG
-    helpers.setup_logging(LOG_LEVEL)
+
 
     # Setup memcache.
     memcache_client = helpers.get_mc_client()

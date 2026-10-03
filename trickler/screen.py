@@ -214,7 +214,6 @@ if __name__ == "__main__":
 
     # Default argument values.
     DEFAULTS = dict(
-        verbose = False,
         button1_gpio = 23,
         button2_gpio = 24,
         font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -232,16 +231,8 @@ if __name__ == "__main__":
     
     config = helpers.load_config(args.config_file)
 
-    # Order of priority is 1) command-line argument, 2) config file, 3) default.
-    VERBOSE = DEFAULTS['verbose'] or config['general']['verbose']
-    if args.verbose is not None:
-        VERBOSE = args.verbose
-
-    # Configure Python logging.
-    LOG_LEVEL = logging.INFO
-    if VERBOSE:
-        LOG_LEVEL = logging.DEBUG
-    helpers.setup_logging(LOG_LEVEL)  
+    # --verbose on the command line wins, else the config file decides.
+    helpers.setup_logging(helpers.log_level(config, args.verbose))
     
     logging.info('Starting OpenTrickler Screen daemon...')
     logging.info('Setting up Screen...')

@@ -56,6 +56,28 @@ def load_config(path):
     return config
 
 
+def log_level(config, verbose_arg=None):
+    """The logging level a daemon should run at.
+
+    An explicit --verbose on the command line wins; otherwise [general] verbose in the
+    config file decides, read as a boolean. It used to be read as a string, and the
+    string 'False' is true, so every daemon ran at DEBUG whatever the file said -- the
+    trickler alone logged every scale frame, twenty a second, and journald rotated the
+    lines worth keeping out within minutes. A value that is not a boolean at all reads as
+    off, with a warning, rather than as on.
+    """
+    if verbose_arg is not None:
+        verbose = bool(verbose_arg)
+    else:
+        try:
+            verbose = config.getboolean('general', 'verbose', fallback=False)
+        except ValueError:
+            logging.warning('[general] verbose = %r is not a boolean; logging at INFO.',
+                            config.get('general', 'verbose', fallback=None))
+            verbose = False
+    return logging.DEBUG if verbose else logging.INFO
+
+
 def setup_logging(level=logging.DEBUG):
     """Returns a configured logger instance."""
     logging.basicConfig(

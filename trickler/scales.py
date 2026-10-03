@@ -518,7 +518,6 @@ if __name__ == '__main__':
 
     # Default argument values.
     DEFAULTS = dict(
-        verbose = False,
         scale = 'and-fx120',
         scale_port = '/dev/ttyUSB0',
         scale_baudrate = 19200,
@@ -540,16 +539,15 @@ if __name__ == '__main__':
     # Parse the config file.
     config = helpers.load_config(args.config_file)
 
+    # --verbose on the command line wins, else the config file decides.
+    helpers.setup_logging(helpers.log_level(config, args.verbose))
+
     # Order of priority is 1) command-line argument, 2) config file, 3) default.
     kwargs = {}
-    VERBOSE = DEFAULTS['verbose'] or config['general']['verbose']
     SCALE_MODEL = DEFAULTS['scale'] or config['scale']['model']
     SCALE_PORT = DEFAULTS['scale_port'] or config['scale']['port']
     SCALE_BAUDRATE = DEFAULTS['scale_baudrate'] or config['scale']['baudrate']
     SCALE_TIMEOUT = DEFAULTS['scale_timeout'] or config['scale']['timeout']
-    if args.verbose is not None:
-        VERBOSE = args.verbose
-        kwargs['verbose'] = args.verbose
     if args.scale is not None:
         SCALE_MODEL = args.scale
         kwargs['scale_model'] = args.scale
@@ -559,12 +557,6 @@ if __name__ == '__main__':
         kwargs['baudrate'] = args.scale_baudrate
     if args.scale_timeout is not None:
         kwargs['timeout'] = args.scale_timeout
-
-    # Configure Python logging.
-    LOG_LEVEL = logging.INFO
-    if VERBOSE:
-        LOG_LEVEL = logging.DEBUG
-    helpers.setup_logging(LOG_LEVEL)
 
     # Setup memcache.
     memcache_client = helpers.get_mc_client()
