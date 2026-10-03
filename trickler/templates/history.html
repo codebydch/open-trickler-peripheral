@@ -108,6 +108,7 @@
             <span>{{ '%.0f'|format(stats.within * 100) }}%</span>
           </div>
           <div>Mean error<span>{{ '%+.3f'|format(stats.mean) }}</span></div>
+          <div>Landed heavy<span>{{ '%.0f'|format(stats.heavy * 100) }}%</span></div>
           <div>Std deviation<span>{{ '%.3f'|format(stats.sigma) }}</span></div>
           <div>Worst under<span>{{ '%+.3f'|format(stats.low) }}</span></div>
           <div>Worst over<span>{{ '%+.3f'|format(stats.high) }}</span></div>
@@ -166,17 +167,19 @@
         <div class="scroll">
           <table>
             <tr>
-              <th>When</th><th>Powder</th><th>Target</th><th>Actual</th>
-              <th>Error</th><th>Pulses</th><th>Time</th><th>Rate</th>
+              <th>When</th><th>Powder</th><th>Target</th><th>At complete</th>
+              <th>Landed</th><th>Error</th><th>Pulses</th><th>Time</th><th>Rate</th>
             </tr>
             {% for row in rows %}
               {% set complete = row.outcome == 'complete' %}
-              <tr class="{% if not complete %}incomplete{% elif row.error|float > 0 %}over{% elif row.error|float < 0 %}under{% endif %}">
+              {% set err = row.true_error if row.true_error is not none else (row.error|float if complete else 0) %}
+              <tr class="{% if not complete %}incomplete{% elif err > 0 %}over{% elif err < 0 %}under{% endif %}">
                 <td>{{ row.timestamp|replace('T', ' ') }}</td>
                 <td>{{ row.profile or '—' }}</td>
                 <td>{{ row.target }}</td>
                 <td>{{ row.final if complete else row.outcome }}</td>
-                <td class="error">{{ '%+.3f'|format(row.error|float) if complete else '' }}</td>
+                <td>{{ row.landed if row.landed else '—' }}</td>
+                <td class="error">{{ '%+.3f'|format(err) if complete else '' }}</td>
                 <td>{{ row.pulses }}</td>
                 <td>{{ row.seconds }}s</td>
                 <td>{{ row.learned_rate }}</td>

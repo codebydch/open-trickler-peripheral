@@ -62,10 +62,12 @@ profile**, so switching from a stick powder to a ball powder switches the estima
 than blending the two into an average that fits neither. Profiles are
 created from the tuning page and stored as `[profile:Name]` sections in the config file.
 
-Every charge is recorded: target, what it actually weighed, the error, how many pulses it
-took and how long. `/app/history` shows the last hundred with the mean error, standard
-deviation, and the share that landed inside ±0.02 gn — which is the number that answers
-whether the machine is accurate enough.
+Every charge is recorded: target, the reading when the charge was declared complete, what
+the pan weighed a couple of seconds later once the powder still in the air had landed
+(`landed_wait`), how many pulses it took and how long. `/app/history` shows the last
+hundred with the mean error, standard deviation, the share inside ±0.02 gn and the share
+that landed heavy — the numbers that answer whether the machine is accurate enough, judged
+by what landed rather than by the reading the feeder stopped on.
 
 Every **pulse** is recorded too — motor speed, how long it ran, what it delivered. From
 pulses at two different lengths the history page solves for the steady feed rate and the

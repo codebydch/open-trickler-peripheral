@@ -8,6 +8,7 @@ between `main.py` and `scales.py`, which a test using a stubbed scale object can
 import configparser
 import decimal
 import enum
+import math
 import os
 import random
 
@@ -191,6 +192,110 @@ class VibratoryMotor:
         return self._slope * (self.speed - STALL_PWM) * moving
 
 
+class Tube:
+    """The lip of a trickler tube, where grains wait to fall: what makes pulses lumpy.
+
+    Fitted to the bench record of 2026-10-03, which the old continuous model could not
+    produce: identical 0.4 s pulses at 30% dropping 0, 0, 0, 0, 0.02 and then 0.08; a
+    nine-grain pulse at 45%; a 30 ms fine pulse dropping three grains right after fast
+    pulses, and nothing at all a few pulses later.
+
+    Running the motor moves grains from the hopper onto a ramp, and from the ramp onto
+    the lip, at drive-dependent rates. Grains leave the lip in *events* -- a Poisson
+    process while moving, rate rising with drive -- and each event takes a clump, which
+    is what a burst is. The jolt of the motor starting shakes a clump loose on its own
+    with some probability, which is why a pulse too short to move much still delivers
+    when the lip is loaded. An empty lip delivers nothing however long the pulse, which
+    is the run of zeros.
+
+    Grains that have left land `landing_delay()` later: most inside a quarter of a
+    second, some the better part of a second. That is the tail that a 0.3 s settle
+    credits to the next pulse.
+    """
+
+    # The defaults were fitted to the 2026-10-03 record by tests/test_simulator.py's
+    # regimes: a grid over these values, scored against the table there.
+    def __init__(self, rng, ramp_rate=40.0, lip_rate=220.0, lip_capacity=20.0,
+                 event_rate=16.0, burst_chance=0.06, kick=1.0, tail_share=0.5,
+                 lip_exponent=2.0, tail_max=1.2):
+        self._rng = rng
+        self.tail_share = tail_share    # share of grains that take the slow way down
+        self.tail_max = tail_max        # the slowest of them lands this long after leaving
+        self.lip_exponent = lip_exponent  # how steeply lip feed falls off below full drive
+        self.ramp = 0.0         # grains on the ramp, fed from the hopper while running
+        self.lip = 0.0          # grains at the lip, ready to fall
+        self.ramp_rate = ramp_rate      # grains/s hopper -> ramp at full drive above stall
+        # Ramp -> lip, at full drive. Falls off faster than the drive does (drive^1.5).
+        # At 45% the lip is fed faster than discharge empties it, so continuous running
+        # leaves it full and the next pulses burst; at 30% it is fed slower than 0.4 s
+        # pulses empty it, so a run of them starves it -- the run of zeros on the bench.
+        self.lip_rate = lip_rate
+        self.lip_capacity = lip_capacity
+        self.event_rate = event_rate    # discharge events/s at full drive above stall
+        self.burst_chance = burst_chance  # an event that takes a clump instead of a grain
+        # Chance the motor starting shakes a clump loose. Scales with the square of how
+        # full the lip is: a loaded lip (right after fast pulses) nearly always sheds on
+        # the jolt, a half-empty one rarely -- which is how a 30 ms fine pulse delivers
+        # three grains after fast pulses and nothing after a run of fine ones.
+        self.kick = kick
+
+    @staticmethod
+    def _drive(speed):
+        """Fraction of full drive above the stall point, 0 at or below it."""
+        return max(0.0, (speed - STALL_PWM) / (1.0 - STALL_PWM))
+
+    def _clump(self):
+        """How many grains one discharge event takes: one, or now and then a clump."""
+        size = 1
+        if self._rng.random() < self.burst_chance:
+            size += self._rng.randint(2, 5)
+        return min(size, int(self.lip))
+
+    def run(self, dt, speed, starting):
+        """Moves powder for `dt` seconds at `speed` (0-1); returns whole grains released.
+
+        `starting` is True on the step the motor was switched on.
+        """
+        drive = self._drive(speed)
+        if drive <= 0:
+            return 0
+        self.ramp += self.ramp_rate * drive * dt
+        onto_lip = min(self.ramp, self.lip_rate * drive ** self.lip_exponent * dt,
+                       max(0.0, self.lip_capacity - self.lip))
+        self.ramp -= onto_lip
+        self.lip += onto_lip
+
+        released = 0
+        events = 0
+        # Poisson count of discharge events in dt.
+        expected = self.event_rate * drive * dt
+        threshold = math.exp(-expected)
+        product = self._rng.random()
+        while product > threshold:
+            events += 1
+            product *= self._rng.random()
+        for _ in range(events):
+            if self.lip < 1:
+                break
+            grains = self._clump()
+            self.lip -= grains
+            released += grains
+        # The jolt of the motor starting shakes loose whatever is teetering: from a loaded
+        # lip a clump of several grains, from a half-empty one a grain or nothing.
+        fullness = min(1.0, self.lip / self.lip_capacity)
+        if starting and self.lip >= 1 and self._rng.random() < self.kick * fullness ** 2:
+            grains = min(int(self.lip), 1 + int(self._rng.random() * (1 + 3 * fullness)))
+            self.lip -= grains
+            released += grains
+        return released
+
+    def landing_delay(self):
+        """Seconds from leaving the lip to landing in the pan."""
+        if self._rng.random() >= self.tail_share:
+            return self._rng.uniform(0.05, 0.3)
+        return self._rng.uniform(0.3, self.tail_max)
+
+
 class SimulatedMachine:
     """Motors feeding a pan on a scale that lags, quantises, and streams frames.
 
@@ -206,11 +311,16 @@ class SimulatedMachine:
     that cannot exist, and a stopping rule finer than the machine can see.
 
     Set `kernel` to 0 for the old continuous behaviour.
+
+    `tube=True` replaces the grain-by-grain model with a `Tube` per motor -- lumpy,
+    bursty, with a landing tail -- fitted to the bench record; `flicker=True` makes a
+    still pan's stable reading wander a division now and then, as the real scale's does.
+    Both are off by default so the older tests keep testing what they tested.
     """
 
     def __init__(self, start_weight, fine_rate=0.3, coarse_rate=0.6,
                  lag=2, resolution='0.02', frame=and_frame, min_pwm=25.0,
-                 stable_samples=3, kernel='0.02', seed=1):
+                 stable_samples=3, kernel='0.02', seed=1, tube=False, flicker=False):
         self.true_weight = D(str(start_weight))
         self.resolution = D(resolution)
         self.kernel = D(str(kernel))
@@ -228,6 +338,18 @@ class SimulatedMachine:
         # should fail the same way next time.
         self._random = random.Random(seed)
         self._next_grain = self._grain_weight()
+        # The lumpy model: a tube per motor, grains in the air waiting to land as
+        # (landing_time, weight), and whether each motor was running last tick.
+        # `tube` may be True for the fitted defaults, or a dict of Tube() arguments.
+        tube_args = tube if isinstance(tube, dict) else {}
+        self.tubes = ({self.motor1: Tube(self._random, **tube_args),
+                       self.motor2: Tube(self._random, **tube_args)} if tube else None)
+        self._airborne = []
+        self._was_running = {self.motor1: False, self.motor2: False}
+        # A still pan's stable reading steps a division up or down every few seconds.
+        self.flicker = flicker
+        self._flicker_offset = D('0')
+        self._next_flicker = 0.0
         # When muted the scale stops sending, as if the serial link had dropped.
         self.mute = False
         self.port = FakeSerial()
@@ -274,6 +396,11 @@ class SimulatedMachine:
     def _reported(self):
         """What the scale would display now: `lag` samples behind, rounded to a division."""
         raw = self._history[-1 - self.lag] if len(self._history) > self.lag else self._history[0]
+        if self.flicker and self.elapsed >= self._next_flicker:
+            self._flicker_offset = (D('0') if self._flicker_offset else
+                                    self.resolution * self._random.choice((-1, 1)))
+            self._next_flicker = self.elapsed + self._random.uniform(2.0, 10.0)
+        raw += self._flicker_offset
         return (raw / self.resolution).quantize(D('1'), rounding=decimal.ROUND_HALF_UP) * self.resolution
 
     @property
@@ -292,11 +419,40 @@ class SimulatedMachine:
 
     def tick(self, dt):
         """Advances the simulation, landing powder and emitting a fresh frame."""
-        for motor in (self.motor1, self.motor2):
-            self.true_weight += self._deliver(round(motor.flow(dt), 7))
+        if self.tubes is None:
+            for motor in (self.motor1, self.motor2):
+                self.true_weight += self._deliver(round(motor.flow(dt), 7))
+        else:
+            self._tick_tubes(dt)
         self._history.append(self.true_weight)
         self.elapsed += dt
         self._emit()
+
+    def _tick_tubes(self, dt):
+        """The lumpy model: each motor's tube releases grains, which land a little later."""
+        for motor in (self.motor1, self.motor2):
+            running = motor.speed > STALL_PWM
+            starting = running and not self._was_running[motor]
+            self._was_running[motor] = running
+            if not running:
+                motor._run_time = 0.0
+                continue
+            # Only the part of the tick after the motor has spun up moves powder; the
+            # jolt of starting is passed on its own, since it sheds grains by itself.
+            moving = max(0.0, min(dt, motor._run_time + dt - SPIN_UP))
+            motor._run_time += dt
+            grains = self.tubes[motor].run(moving, motor.speed, starting)
+            for _ in range(grains):
+                self._airborne.append((self.elapsed + self.tubes[motor].landing_delay(),
+                                       self._grain_weight()))
+        landing_now = self.elapsed + dt
+        still_up = []
+        for land_at, weight in self._airborne:
+            if land_at <= landing_now:
+                self.true_weight += weight
+            else:
+                still_up.append((land_at, weight))
+        self._airborne = still_up
 
     def settle(self, seconds=1.0):
         """Runs time forward with the motors off, so in-flight powder lands."""

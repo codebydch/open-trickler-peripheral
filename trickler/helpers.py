@@ -228,6 +228,13 @@ TRICKLER_SETTINGS = (
         'landing on target but sometimes one step heavy. A light charge is trickled up; '
         'a heavy one has to be dumped.'),
     TricklerSetting(
+        'landed_wait', 'Confirm what landed', '2.0', 0.0, 10.0, 0.5,
+        'Seconds to keep reading the scale after a charge completes, to record what '
+        'actually landed. Powder is still falling when the charge is declared complete '
+        '-- on the bench 1-3 divisions arrived after the reading -- and this is the only '
+        'way the history can tell a heavy charge from a light one. Not part of the charge '
+        'time: the motors are off and you are reaching for the pan. 0 skips it.'),
+    TricklerSetting(
         'rate_window', 'Feed rate samples', '12', 2.0, 20.0, 1.0,
         'Scale readings averaged when judging how fast powder is landing during the '
         'continuous phases. The loop reads faster than the scale updates and powder '
@@ -345,6 +352,9 @@ HISTORY_COLUMNS = (
     'pulses',
     'seconds',
     'learned_rate',
+    # What the pan weighed a couple of seconds after "complete", once the powder still in
+    # the air had come down. Blank when the pan was lifted first or landed_wait is 0.
+    'landed',
 )
 
 
@@ -362,6 +372,8 @@ PULSE_COLUMNS = (
     'dose',
     'rate',
     'unit',
+    # 'charge' for the final approach of a normal charge, 'calibration' for the routine.
+    'source',
 )
 
 
@@ -567,6 +579,20 @@ def pulse_fit(rows, min_per_bucket=10):
     return fit
 
 
+def charge_error(row):
+    """How far a recorded charge was from its target, preferring what landed.
+
+    `error` is the completion reading minus the target, which is what the feeder stopped
+    on. When the row has `landed` -- the pan a couple of seconds later -- that is what the
+    charge really was, and the difference between the two is powder that was still in
+    the air. Raises on a row that has neither as a number.
+    """
+    landed = row.get('landed')
+    if landed not in (None, ''):
+        return float(landed) - float(row['target'])
+    return float(row['error'])
+
+
 def charge_statistics(rows, tolerance=0.02):
     """Summarises completed charges: how many, how far off, and how many were good.
 
@@ -578,18 +604,21 @@ def charge_statistics(rows, tolerance=0.02):
         if row.get('outcome') != 'complete':
             continue
         try:
-            errors.append(float(row['error']))
+            errors.append(charge_error(row))
         except (KeyError, TypeError, ValueError):
             continue
 
     if not errors:
         return {'count': 0, 'mean': None, 'sigma': None, 'low': None, 'high': None,
-                'within': None, 'tolerance': tolerance}
+                'within': None, 'heavy': None, 'tolerance': tolerance}
 
     mean = sum(errors) / len(errors)
     # Population standard deviation: this is the whole record, not a sample of it.
     sigma = math.sqrt(sum((e - mean) ** 2 for e in errors) / len(errors))
     within = sum(1 for e in errors if abs(e) <= tolerance) / len(errors)
+    # Over by more than half a division: the charge has to be dumped, or a grain lifted
+    # out by hand. The number the owner tunes against.
+    heavy = sum(1 for e in errors if e > tolerance / 2) / len(errors)
     return {
         'count': len(errors),
         'mean': mean,
@@ -597,6 +626,7 @@ def charge_statistics(rows, tolerance=0.02):
         'low': min(errors),
         'high': max(errors),
         'within': within,
+        'heavy': heavy,
         'tolerance': tolerance,
     }
 

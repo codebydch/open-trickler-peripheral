@@ -109,6 +109,34 @@ class ReadyToChargeTest(PassTestCase):
         self.assertEqual(machine.motor1.speed, 0.0)
         self.assertEqual(machine.motor2.speed, 0.0)
 
+    def test_a_changing_reading_is_logged_at_most_once_a_second(self):
+        """Lifting and emptying the pan changes the reading on every frame; that was
+        sixty lines in nine seconds on the bench."""
+        scale = mock.Mock()
+        scale.Units = scales.ANDScale.Units
+        scale.unit = scales.ANDScale.Units.GRAINS
+        scale.is_stable = False
+        scale.is_fresh = True
+        readings = iter(D(str(w)) for w in range(0, 2000))
+        type(scale).weight = mock.PropertyMock(side_effect=lambda: next(readings))
+        hw = main.Hardware(mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock(), scale,
+                           logging.getLogger('pid_tune'))
+        self.memcache.update({'auto_mode': False, 'target_weight': D('45.00'),
+                              'target_unit': scale.unit})
+        clock = [1000.0]
+
+        def tick():
+            clock[0] += 0.1
+            return clock[0]
+        with mock.patch.object(time, 'time', tick), self.assertLogs(level='INFO') as logs:
+            last = None
+            for _ in range(30):     # three seconds of a reading that never repeats
+                last = main.run_pass(self.config, self.memcache, self.constants, hw,
+                                     self.models, last)
+        status_lines = [line for line in logs.output if 'target: ' in line]
+        self.assertLessEqual(len(status_lines), 4)
+        self.assertGreaterEqual(len(status_lines), 3, 'the state must still be logged')
+
     def test_the_status_is_logged_only_when_it_changes(self):
         machine, scale, measure = self.machine('45.00')
         with self.assertLogs(level='INFO') as logs:

@@ -39,6 +39,15 @@ fake serial port, delivering powder as **whole grains** (0.02 gn nominal, ±25%)
 use (`pulse_dead_time=0.02` in `GranularDeliveryTest`) rather than inheriting the shipped
 defaults, so they keep testing the same thing when a default moves.
 
+`SimulatedMachine(tube=True)` switches to the **lumpy model** fitted to the bench record
+of 2026-10-03: a `Tube` per motor whose lip loads while running and sheds grains in
+events and clumps, a jolt on motor start that sheds a clump from a loaded lip, and a
+landing tail. `tests/test_simulator.py` pins it to the record (zero rate, mean dose, burst
+rate per regime) and is the simulator's contract with the bench -- if it fails, the model
+has drifted from the machine, and nothing proved on it counts. `flicker=True` adds the
+scale's idle ±1-division wander. The default model is the older grain-by-grain one, kept
+so the charge tests keep their meaning until the endgame is redesigned on the lumpy one.
+
 ## Layout
 
 - `trickler/main.py` -- the charge loop: continuous PID trickling, then `PulseFeeder` for
@@ -149,7 +158,13 @@ defaults, so they keep testing the same thing when a default moves.
   and spin-up from it, so bench evidence no longer has to be pasted from the journal.
 - Reading pulse logs: `remainder: R ... scale: W ... pulsed T s -> D (rate X/s)` -- R is
   before the pulse, W after, and X is the **fine** rate only. Fast-pulse learning isn't
-  logged; `pulses.csv` has both, with the rate at the speed each pulse used.
+  logged; `pulses.csv` has both, with the rate at the speed each pulse used, and a
+  `source` column (`charge` / `calibration`).
+- `charges.csv` has `final` (the reading at "complete") **and `landed`** (the pan
+  `landed_wait` seconds later, once the powder in the air came down). Judge heavy/light by
+  `landed`; `helpers.charge_error` does. `PulseFeeder` and `settled_weight` take a `clock`
+  (and the feeder a `sleep`) so a charge can be simulated on simulated time without
+  patching the time module.
 - At a 0.3 s settle, one pulse's powder is often credited to the next: `pulses.csv` and
   the learned rate then disagree with the scale display, and the display is right. Check
   the display after a charge before trusting a dose in the record.

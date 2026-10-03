@@ -154,11 +154,18 @@ class HistoryPageTest(AppTestCase):
     def tearDown(self):
         shutil.rmtree(self.directory, ignore_errors=True)
 
-    def record(self, error, outcome='complete', profile=''):
+    def record(self, error, outcome='complete', profile='', landed=''):
         helpers.append_charge(self.path, {
             'timestamp': '2026-09-01T10:00:00', 'profile': profile, 'outcome': outcome,
             'target': '45.00', 'final': '45.01', 'error': str(error), 'unit': 'GRAINS',
-            'pulses': '6', 'seconds': '7.2', 'learned_rate': '0.28'})
+            'pulses': '6', 'seconds': '7.2', 'learned_rate': '0.28', 'landed': landed})
+
+    def test_the_page_shows_what_landed(self):
+        self.record(-0.02, landed='45.04')
+        body = self.client.get('/app/history').get_data(as_text=True)
+        self.assertIn('45.04', body)
+        self.assertIn('+0.040', body, 'the error shown is against what landed')
+        self.assertIn('Landed heavy', body)
 
     def test_empty_history_says_so_rather_than_failing(self):
         page = self.client.get('/app/history')

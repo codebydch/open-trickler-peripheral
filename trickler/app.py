@@ -117,11 +117,17 @@ def pulses_path():
     return helpers.history_files(config).pulses
 
 
-def recorded_pulses(profile=''):
-    """Every recorded pulse, oldest first, for one profile or for all of them."""
+def recorded_pulses(profile='', source=''):
+    """Every recorded pulse, oldest first, for one profile or all, one source or all.
+
+    `source` is 'charge' for the final approach of normal charges and 'calibration' for
+    the routine; rows written before the column existed count as charges.
+    """
     rows = helpers.read_pulses(pulses_path()) if pulses_path() else []
     if profile:
         rows = [row for row in rows if row.get('profile') == profile]
+    if source:
+        rows = [row for row in rows if (row.get('source') or 'charge') == source]
     return rows
 
 
@@ -148,6 +154,12 @@ def history():
     wanted = request.args.get('profile', '')
     if wanted:
         rows = [row for row in rows if row.get('profile') == wanted]
+    for row in rows:
+        # What the charge really was, when the daemon waited to see it land.
+        try:
+            row['true_error'] = helpers.charge_error(row)
+        except (KeyError, TypeError, ValueError):
+            row['true_error'] = None
     return render_template(
         'history.html',
         rows=list(reversed(rows))[:100],
@@ -174,7 +186,7 @@ def pulses_json():
     profile, since a fit over a sample of the record would be a different fit from the
     page's.
     """
-    rows = recorded_pulses(request.args.get('profile', ''))
+    rows = recorded_pulses(request.args.get('profile', ''), request.args.get('source', ''))
     return jsonify(rows=rows[-500:], fit=helpers.pulse_fit(rows))
 
 
