@@ -7,10 +7,14 @@ break when it is added beside the charge.
 """
 import decimal
 import logging
+import os
+import shutil
+import tempfile
 import time
 import unittest
 from unittest import mock
 
+import helpers
 import main
 import scales
 import PID
@@ -194,3 +198,51 @@ def helpers_command_key(constants):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ApplyCalibrationTest(PassTestCase):
+    """Applying a calibration seeds the profile's rates at the speeds now in force."""
+
+    def setUp(self):
+        super().setUp()
+        self.directory = tempfile.mkdtemp()
+        self.config = fakes.load_config(
+            history_path=os.path.join(self.directory, 'charges.csv'))
+        self.constants = fakes.constants_for(self.config)
+        self.models = main.FeedModels(self.memcache, self.constants)
+        helpers.write_json(os.path.join(self.directory, 'learned.json'), {
+            'Varget': {'calibration': {
+                'stall_pwm': 18, 'rates': {'25.0': 0.1, '30.0': 0.15, '45.0': 0.25}}}})
+
+    def tearDown(self):
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def test_the_rates_at_the_applied_speeds_are_taken_as_measured(self):
+        machine, scale, measure = self.machine('45.00', auto_mode=False)
+        self.memcache['trickler_command'] = {
+            'command': 'calibrate_apply', 'profile': 'Varget',
+            'pulse_pwm': 30.0, 'pulse_fast_pwm': 45.0}
+        self.run_passes(machine, scale, measure, count=1)
+        self.assertAlmostEqual(self.memcache['trickler_pulse_rate:Varget'], 0.15)
+        self.assertAlmostEqual(self.memcache['trickler_fast_pulse_rate:Varget'], 0.25)
+        stored = helpers.read_json(os.path.join(self.directory, 'learned.json'))['Varget']
+        self.assertAlmostEqual(stored['rate'], 0.15)
+        self.assertIn('calibration', stored, 'the record is kept beside the rates')
+
+    def test_one_speed_means_no_fast_rate(self):
+        machine, scale, measure = self.machine('45.00', auto_mode=False)
+        self.memcache['trickler_command'] = {
+            'command': 'calibrate_apply', 'profile': 'Varget',
+            'pulse_pwm': 30.0, 'pulse_fast_pwm': 30.0}
+        self.run_passes(machine, scale, measure, count=1)
+        self.assertAlmostEqual(self.memcache['trickler_pulse_rate:Varget'], 0.15)
+        self.assertNotIn('trickler_fast_pulse_rate:Varget', self.memcache)
+
+    def test_a_speed_the_sweep_did_not_visit_is_left_to_be_probed(self):
+        machine, scale, measure = self.machine('45.00', auto_mode=False)
+        self.memcache['trickler_command'] = {
+            'command': 'calibrate_apply', 'profile': 'Varget',
+            'pulse_pwm': 35.0, 'pulse_fast_pwm': 45.0}
+        with self.assertLogs(level='WARNING'):
+            self.run_passes(machine, scale, measure, count=1)
+        self.assertNotIn('trickler_pulse_rate:Varget', self.memcache)

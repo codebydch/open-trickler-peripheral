@@ -190,3 +190,75 @@ class FeedModelsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SharedEntryTest(FeedModelTest):
+    """The profile's learned.json entry is shared with the calibration routine.
+
+    The routine stores its results under `calibration` in the same entry, and the first
+    pulse learned afterwards used to write the entry out whole, taking the results with
+    it. The model now owns only its own keys there.
+    """
+
+    def stored_entry(self, profile=''):
+        return helpers.read_json(self.path).get(profile, {})
+
+    def plant_calibration(self, settings):
+        data = helpers.read_json(self.path)
+        entry = data.get(settings.profile, {})
+        entry['calibration'] = {'stall_pwm': 18, 'rates': {'30.0': 0.15, '45.0': 0.25}}
+        data[settings.profile] = entry
+        helpers.write_json(self.path, data)
+
+    def test_learning_keeps_the_calibration_block(self):
+        settings, _ = self.settings()
+        self.plant_calibration(settings)
+        main.FeedModel(settings).learn(0.2, 0.06, False, 0.02)
+        entry = self.stored_entry()
+        self.assertIn('calibration', entry)
+        self.assertAlmostEqual(entry['rate'], 0.3)
+
+    def test_reset_keeps_the_calibration_block_and_drops_the_rates(self):
+        settings, _ = self.settings()
+        model = main.FeedModel(settings)
+        model.learn(0.2, 0.06, False, 0.02)
+        self.plant_calibration(settings)
+        model.reset(settings)
+        entry = self.stored_entry()
+        self.assertIn('calibration', entry)
+        self.assertNotIn('rate', entry)
+        self.assertFalse(main.FeedModel(settings).measured)
+
+    def test_reset_with_nothing_else_in_the_entry_removes_it(self):
+        settings, _ = self.settings()
+        model = main.FeedModel(settings)
+        model.learn(0.2, 0.06, False, 0.02)
+        model.reset(settings)
+        self.assertNotIn('', helpers.read_json(self.path))
+
+
+class SeedTest(FeedModelTest):
+    """Taking the calibration routine's rates as measured, when its result is applied."""
+
+    def test_seeded_rates_are_measured_and_stored(self):
+        memcache = fakes.FakeMemcache()
+        settings, constants = self.settings(memcache=memcache)
+        model = main.FeedModel(settings, memcache, constants)
+        model.seed(0.15, 0.25)
+        self.assertTrue(model.measured)
+        self.assertAlmostEqual(model.rate, 0.15)
+        self.assertAlmostEqual(model.fast_rate, 0.25)
+        self.assertAlmostEqual(memcache['trickler_pulse_rate'], 0.15)
+        self.assertAlmostEqual(memcache['trickler_fast_pulse_rate'], 0.25)
+        again = main.FeedModel(settings, fakes.FakeMemcache(), constants)
+        self.assertTrue(again.measured, 'the seed survives a restart')
+        self.assertAlmostEqual(again.fast_rate, 0.25)
+
+    def test_seeding_without_a_fast_rate_leaves_the_fast_speed_to_be_probed(self):
+        memcache = fakes.FakeMemcache()
+        settings, constants = self.settings(memcache=memcache)
+        model = main.FeedModel(settings, memcache, constants)
+        model.learn(0.2, 0.30, True, 0.02)
+        model.seed(0.15)
+        self.assertIsNone(model.fast_rate)
+        self.assertNotIn('trickler_fast_pulse_rate', memcache)

@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>OpenTrickler Calibration</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f8f9fa;
+        margin: 0;
+        padding: 20px 10px;
+      }
+      .container {
+        background-color: #ffffff;
+        border-radius: 8px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        padding: 20px;
+        max-width: 780px;
+        margin: 0 auto;
+      }
+      h1 { margin-top: 0; font-size: 24px; text-align: center; }
+      h2 { font-size: 18px; margin: 24px 0 8px; }
+      p, li { font-size: 14px; color: #495057; line-height: 1.5; }
+      .intro { margin-bottom: 16px; }
+      .notice, .warn, .alarm, .running {
+        border-radius: 4px;
+        padding: 10px;
+        margin-bottom: 16px;
+        font-size: 15px;
+      }
+      .notice { background-color: #d4edda; color: #155724; }
+      .warn { background-color: #fff3cd; color: #856404; }
+      .alarm { background-color: #f8d7da; color: #842029; }
+      .running { background-color: #e7f1ff; color: #084298; }
+      .running strong { display: block; font-size: 17px; margin-bottom: 4px; }
+      .bar { background-color: #cfe2ff; border-radius: 4px; height: 10px; margin: 8px 0; overflow: hidden; }
+      .bar div { background-color: #0d6efd; height: 100%; width: 0; transition: width 0.5s; }
+      .prompt { font-size: 18px; font-weight: bold; }
+      .status {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        background-color: #f1f3f5;
+        border-radius: 6px;
+        padding: 12px;
+        margin: 16px 0;
+      }
+      .status div { flex: 1 1 30%; font-size: 14px; }
+      .status span { display: block; font-size: 19px; font-weight: bold; margin-top: 3px; }
+      .field { padding: 10px 0; border-top: 1px solid #e9ecef; }
+      .field label { font-size: 16px; font-weight: bold; display: block; }
+      .field p { font-size: 13px; color: #6c757d; margin: 4px 0 8px; }
+      .field .error { color: #b02a37; font-size: 13px; margin: 4px 0 0; }
+      input[type="number"], input[type="text"], select {
+        padding: 9px;
+        font-size: 15px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+      }
+      input[type="number"] { width: 140px; }
+      input[type="text"] { width: 200px; }
+      button {
+        margin-top: 10px;
+        padding: 10px 20px;
+        font-size: 16px;
+        color: #ffffff;
+        background-color: #007bff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:hover { background-color: #0056b3; }
+      button:disabled { background-color: #adb5bd; cursor: default; }
+      .secondary { background-color: #6c757d; }
+      .secondary:hover { background-color: #5a6268; }
+      .danger { background-color: #dc3545; }
+      .danger:hover { background-color: #b02a37; }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+      .actions form { margin: 0; }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid #e9ecef; white-space: nowrap; }
+      th:first-child, td:first-child { text-align: left; }
+      th { border-bottom: 2px solid #ced4da; }
+      tr.pick td { font-weight: bold; }
+      td.bad { color: #b02a37; }
+      .scroll { overflow-x: auto; }
+      .proposed input[type="number"] { width: 100px; padding: 6px; }
+      .links { text-align: center; margin-top: 20px; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Calibrate for a Powder</h1>
+
+      <p class="intro">
+        The trickler measures how <em>this</em> powder feeds &mdash; trickler 1 only, the
+        powder measure never runs &mdash; and proposes final-approach settings for the
+        fastest charge that lands heavy no more than one time in four. It primes the tube,
+        finds the speed the motor stalls at, then pulses at every speed and length in the
+        <code>[calibration]</code> grid, weighing each pulse. About three minutes with the
+        shipped grid. Put an empty cup on the pan and keep the hopper topped up.
+      </p>
+
+      {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+      <div id="live" class="running" {% if not running %}hidden{% endif %}>
+        <strong id="phase">{% if status %}{{ status.phase }}{% endif %}</strong>
+        <span id="message">{% if status %}{{ status.message }}{% endif %}</span>
+        <div class="bar"><div id="bar"></div></div>
+        <div id="pulses"></div>
+        <div id="prompt" class="alarm" hidden>
+          <div class="prompt" id="prompt-title"></div>
+          <div id="prompt-text"></div>
+          <form method="post" action="/app/calibrate/continue" style="display:inline">
+            <button type="submit">Continue</button>
+          </form>
+        </div>
+        <form method="post" action="/app/calibrate/abort" style="display:inline">
+          <button type="submit" class="danger">Abort</button>
+        </form>
+      </div>
+
+      {% if status and status.phase in ('failed', 'aborted') and not running %}
+        <div class="alarm">
+          The last calibration {{ status.phase }}: {{ status.error or status.message }}
+          <form method="post" action="/app/calibrate/dismiss" style="display:inline">
+            <button type="submit" class="secondary">Dismiss</button>
+          </form>
+        </div>
+      {% endif %}
+
+      <div class="status">
+        <div>Scale<span id="scale">&mdash;</span></div>
+        <div>Auto mode<span id="auto">{{ 'ON' if auto_mode else 'OFF' }}</span></div>
+        <div>Profile<span>{{ profile or '(none)' }}</span></div>
+      </div>
+
+      <h2>Start a calibration</h2>
+      {% if auto_mode %}
+        <div class="warn">Auto mode is on. Switch it off before calibrating: the routine
+          runs the trickler on its own and must not race a charge.</div>
+      {% endif %}
+      <form method="post" action="/app/calibrate/start" id="start">
+        <div class="field">
+          <label for="profile">Powder profile</label>
+          <p>The results are stored against this profile, and Apply saves the settings to
+            it. Pick an existing one or type a new name.</p>
+          <select id="profile" name="profile">
+            <option value="">(none &mdash; the plain [trickler] settings)</option>
+            {% for name in profiles %}
+              <option value="{{ name }}" {% if name == profile %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+          </select>
+          <input type="text" name="new_profile" placeholder="or a new name" maxlength="40">
+        </div>
+        <div class="field">
+          <label for="capacity">Container capacity, grains</label>
+          <p>How much the cup on the pan holds. The routine pauses before it gets there and
+            asks you to empty it. Remembered for next time.</p>
+          <input type="number" id="capacity" name="capacity" value="{{ capacity }}" min="20"
+                 max="5000" step="1" required>
+          {% if errors.get('capacity') %}<p class="error">{{ errors['capacity'] }}</p>{% endif %}
+        </div>
+        <div class="field">
+          <label for="pulses_per_cell">Pulses per cell</label>
+          <p>Per speed-and-length combination. 10 is about two minutes of pulsing with the
+            shipped grid; more gives tighter numbers and takes proportionally longer.</p>
+          <input type="number" id="pulses_per_cell" name="pulses_per_cell"
+                 value="{{ pulses_per_cell }}" min="3" max="50" step="1" required>
+          {% if errors.get('pulses_per_cell') %}<p class="error">{{ errors['pulses_per_cell'] }}</p>{% endif %}
+        </div>
+        <button type="submit" id="start-button" {% if running or auto_mode %}disabled{% endif %}>Start</button>
+      </form>
+
+      {% if results %}
+        <h2>
+          {% if results_source == 'status' %}Results{% else %}Last calibration{% endif %}
+          {% if results.profile %}for {{ results.profile }}{% endif %}
+          {% if results.updated %}<small>({{ results.updated }})</small>{% endif %}
+        </h2>
+
+        <div class="status">
+          <div>Stall speed<span>{% if results.stall_pwm is not none %}{{ '%g'|format(results.stall_pwm) }}%{% else %}&mdash;{% endif %}</span></div>
+          <div>Continuous feed<span>{% if results.continuous_rate %}{{ '%.3f'|format(results.continuous_rate) }} gn/s{% else %}&mdash;{% endif %}</span></div>
+          <div>Pulses measured<span>{{ results.pulses }}</span></div>
+        </div>
+
+        {% if results.rates %}
+          <h2>Feed rate by speed</h2>
+          <div class="scroll"><table>
+            <tr><th>Speed</th><th>Rate (gn/s of movement)</th><th>Spin-up (s)</th></tr>
+            {% for speed, rate in results.rates|dictsort %}
+              <tr>
+                <td>{{ '%g'|format(speed|float) }}%</td>
+                <td>{{ '%.3f'|format(rate) }}</td>
+                <td>{% if results.dead_times and speed in results.dead_times %}{{ '%.3f'|format(results.dead_times[speed]) }}{% else %}&mdash;{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </table></div>
+        {% endif %}
+
+        {% if results.cells %}
+          <h2>What a pulse drops</h2>
+          <p>Per speed and length: how often a pulse dropped nothing, the mean dose, how
+            often it dropped four grains or more (0.08 gn), and the most it dropped. The
+            tail is what landed in the second after the reading was taken.</p>
+          <div class="scroll"><table id="cells">
+            <tr><th>Speed</th><th>Length</th><th>Pulses</th><th>Nothing</th><th>Mean</th><th>&ge;4 grains</th><th>Max</th><th>Tail</th></tr>
+            {% for cell in results.cells|sort(attribute='on_time')|sort(attribute='speed') %}
+              <tr>
+                <td>{{ '%g'|format(cell.speed) }}%</td>
+                <td>{{ '%.2f'|format(cell.on_time) }} s</td>
+                <td>{{ cell.pulses }}</td>
+                <td>{{ '%.0f'|format(cell.zeros * 100) }}%</td>
+                <td>{{ '%.3f'|format(cell.mean_dose) }}</td>
+                <td class="{% if cell.bursts > 0.25 %}bad{% endif %}">{{ '%.0f'|format(cell.bursts * 100) }}%</td>
+                <td>{{ '%.2f'|format(cell.max_dose) }}</td>
+                <td>{{ '%.3f'|format(cell.mean_tail) }}</td>
+              </tr>
+            {% endfor %}
+          </table></div>
+        {% endif %}
+
+        {% if recommendation %}
+          <h2>Recommended settings</h2>
+          <p>Predicted from charges simulated against the pulses measured above, through the
+            same final-approach code a real charge uses. Heavy means landed 0.02 gn or more
+            over; the limit is {{ '%.0f'|format(recommendation.heavy_limit * 100) }}%.
+            The real test is the next few charges: <a href="/app/history">the history
+            page</a> shows what landed.</p>
+          <div class="scroll"><table id="recommendation">
+            <tr>
+              <th>Setting</th>
+              <th>Current</th>
+              <th>Recommended</th>
+              {% for other in recommendation.runners_up %}<th>Runner-up {{ loop.index }}</th>{% endfor %}
+            </tr>
+            {% for field in fields if field.name in recommendation.recommended.settings %}
+              <tr>
+                <td>{{ field.label }}</td>
+                <td>{{ '%g'|format(recommendation.current.settings.get(field.name, current[field.name])|float) }}</td>
+                <td><strong>{{ '%g'|format(recommendation.recommended.settings[field.name]|float) }}</strong></td>
+                {% for other in recommendation.runners_up %}<td>{% if field.name in other.settings %}{{ '%g'|format(other.settings[field.name]|float) }}{% else %}&mdash;{% endif %}</td>{% endfor %}
+              </tr>
+            {% endfor %}
+            <tr>
+              <td>Predicted seconds per charge</td>
+              <td>{{ '%.1f'|format(recommendation.current.prediction.seconds) }}</td>
+              <td><strong>{{ '%.1f'|format(recommendation.recommended.prediction.seconds) }}</strong></td>
+              {% for other in recommendation.runners_up %}<td>{{ '%.1f'|format(other.prediction.seconds) }}</td>{% endfor %}
+            </tr>
+            <tr>
+              <td>Predicted heavy</td>
+              <td class="{% if not recommendation.current.meets_limit %}bad{% endif %}">{{ '%.0f'|format(recommendation.current.prediction.heavy * 100) }}%</td>
+              <td class="{% if not recommendation.recommended.meets_limit %}bad{% endif %}"><strong>{{ '%.0f'|format(recommendation.recommended.prediction.heavy * 100) }}%</strong></td>
+              {% for other in recommendation.runners_up %}<td class="{% if not other.meets_limit %}bad{% endif %}">{{ '%.0f'|format(other.prediction.heavy * 100) }}%</td>{% endfor %}
+            </tr>
+            <tr>
+              <td>Predicted light</td>
+              <td>{{ '%.0f'|format(recommendation.current.prediction.light * 100) }}%</td>
+              <td><strong>{{ '%.0f'|format(recommendation.recommended.prediction.light * 100) }}%</strong></td>
+              {% for other in recommendation.runners_up %}<td>{{ '%.0f'|format(other.prediction.light * 100) }}%</td>{% endfor %}
+            </tr>
+            <tr>
+              <td>Pulses per charge</td>
+              <td>{{ '%.1f'|format(recommendation.current.prediction.pulses) }}</td>
+              <td><strong>{{ '%.1f'|format(recommendation.recommended.prediction.pulses) }}</strong></td>
+              {% for other in recommendation.runners_up %}<td>{{ '%.1f'|format(other.prediction.pulses) }}</td>{% endfor %}
+            </tr>
+          </table></div>
+          {% if not recommendation.recommended.meets_limit %}
+            <div class="warn">No setting in the grid met the heavy limit in simulation; the
+              one shown is the least bad. Widen the grid in <code>[calibration]</code>, or
+              tune by hand.</div>
+          {% endif %}
+        {% endif %}
+
+        <h2>Apply</h2>
+        <p>The values below are the recommendation{% if not recommendation %} &mdash; none yet, so
+          these are the settings in force{% endif %}. Edit any of them before applying.
+          Apply puts them in force for the next charge and writes them to the named
+          profile (or to <code>[trickler]</code> with no name), and seeds the profile's
+          learned feed rates from the calibration at those speeds.</p>
+        <form method="post" action="/app/calibrate/apply" class="proposed">
+          <div class="scroll"><table>
+            <tr><th>Setting</th><th>Current</th><th>Apply</th></tr>
+            {% for field in fields %}
+              <tr>
+                <td>{{ field.label }}</td>
+                <td>{{ current[field.name] }}</td>
+                <td><input type="number" name="{{ field.name }}" value="{{ '%g'|format(proposed[field.name]|float) }}"
+                           step="{{ field.step }}" min="{{ field.minimum }}" max="{{ field.maximum }}"></td>
+              </tr>
+            {% endfor %}
+          </table></div>
+          <div class="field">
+            <label for="save_profile">Save to profile</label>
+            <p>Leave blank to write to the plain <code>[trickler]</code> section instead.</p>
+            <input type="text" id="save_profile" name="save_profile" value="{{ results.profile or profile }}" maxlength="40">
+          </div>
+          <div class="actions">
+            <button type="submit">Apply</button>
+            {% if results_source == 'status' %}
+              <button type="submit" formaction="/app/calibrate/dismiss" formnovalidate class="secondary">Discard</button>
+            {% endif %}
+          </div>
+        </form>
+      {% elif not running %}
+        <p>No calibration for {{ profile or 'the plain [trickler] settings' }} yet.</p>
+      {% endif %}
+
+      <h2>Tuning by hand</h2>
+      <p>The routine is not the only way. Set the values on the
+        <a href="/app/config/">tuning page</a>, throw a few charges, and judge them by the
+        <strong>Landed</strong> column on the <a href="/app/history">history page</a>
+        &mdash; what the pan weighed once the powder in the air came down, which is the
+        number that matters. Save the settings to a profile from the tuning page when a
+        powder is throwing well.</p>
+
+      <p class="links">
+        <a href="/app/config/">Tuning</a> &middot;
+        <a href="/app/history">Charge History</a> &middot;
+        <a href="/app/">Control Panel</a> &middot;
+        <a href="/">All pages</a>
+      </p>
+    </div>
+
+    <script>
+      // Follow the routine while it runs. The page is rendered with whatever was known
+      // when it loaded; once the daemon reports it finished, reload once so the results
+      // and the Apply form render server-side.
+      var wasRunning = {{ 'true' if running else 'false' }};
+      var PHASES = {
+        requested: 'Requested', prime: 'Priming the tube', stall: 'Finding the stall speed',
+        reprime: 'Re-priming', sweep: 'Sweeping pulses', paused: 'Paused',
+        fit: 'Fitting', recommending: 'Simulating charges', done: 'Done',
+        failed: 'Failed', aborted: 'Aborted'
+      };
+      function refresh() {
+        fetch('/app/calibrate/status')
+          .then(function (response) { return response.json(); })
+          .then(function (data) {
+            document.getElementById('scale').textContent =
+              data.scale_weight === null || data.scale_weight === undefined ? '—' : data.scale_weight;
+            document.getElementById('auto').textContent = data.auto_mode ? 'ON' : 'OFF';
+            var live = document.getElementById('live');
+            live.hidden = !data.running;
+            document.getElementById('start-button').disabled = data.running || data.auto_mode;
+            if (data.running) {
+              document.getElementById('phase').textContent = PHASES[data.phase] || data.phase;
+              document.getElementById('message').textContent = data.message || '';
+              document.getElementById('bar').style.width = Math.round((data.progress || 0) * 100) + '%';
+              document.getElementById('pulses').textContent = data.pulses_total
+                ? 'Pulse ' + data.pulses_done + ' of ' + data.pulses_total : '';
+              var prompt = document.getElementById('prompt');
+              prompt.hidden = !data.prompt;
+              if (data.prompt === 'empty_container') {
+                document.getElementById('prompt-title').textContent = 'Empty the container';
+                document.getElementById('prompt-text').textContent =
+                  'The cup is nearly full. Lift it, tip the powder back, put it back on the pan, then press Continue.';
+              } else if (data.prompt === 'pan_missing') {
+                document.getElementById('prompt-title').textContent = 'Pan missing';
+                document.getElementById('prompt-text').textContent =
+                  'The scale reads below zero. Put the pan and cup back, then press Continue.';
+              }
+              wasRunning = true;
+            } else if (wasRunning) {
+              window.location.reload();
+            }
+          })
+          .catch(function () {});
+      }
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
+  </body>
+</html>

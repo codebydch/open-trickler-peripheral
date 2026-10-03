@@ -193,6 +193,9 @@ durations = 0.15,0.25,0.40
 # Pulses per speed-and-length cell. 10 is about two minutes for the grid above; the page
 # lets you choose more when you want tighter numbers.
 pulses_per_cell = 10
+# How much the container on the pan holds, in grains. The routine pauses for emptying
+# before it gets there. The calibration page writes the last value used back here.
+capacity = 200
 # Grains kept clear of the container limit before the routine pauses for emptying: a
 # second of continuous running at 45% adds up to half a grain.
 capacity_margin = 0.5

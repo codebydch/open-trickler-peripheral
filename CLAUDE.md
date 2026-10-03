@@ -25,7 +25,7 @@ what a new session would otherwise get wrong.
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
-.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 249 tests
+.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 350 tests
 ```
 
 No pytest. Use 3.13 -- it's what the Pi runs, and 3.13 has broken this code before when
@@ -57,7 +57,12 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
 - `trickler/calibrate.py` -- the calibration routine: a `Calibration` the idle loop steps
   (prime, stall search, sweep with container pauses, fit, recommend), started by the
   `calibrate` command and steered by `calibrate_continue` / `calibrate_abort`; status under
-  the `CALIBRATION_STATUS` key. `trickler/powder_model.py` -- a powder as the sweep measured
+  the `CALIBRATION_STATUS` key. `/app/calibrate/` (`app.py`, `templates/calibrate.html`)
+  starts it, polls the status, shows the cell table and the recommendation, and **Apply**
+  writes the values (live overrides + the profile's section, or `[trickler]` with no
+  name) and sends `calibrate_apply`, which seeds the profile's `FeedModel` from the
+  calibration's per-speed rates at the speeds now in force. The screen shows an amber
+  CALIBRATING band while it runs and a red EMPTY CUP / PAN MISSING one on a pause. `trickler/powder_model.py` -- a powder as the sweep measured
   it (`EmpiricalPowder`) and charges simulated against it through the real `PulseFeeder`
   on a virtual clock (`ChargeSimulator`, `recommend`).
 - `trickler/helpers.py` -- `TRICKLER_SETTINGS` (tuning-page fields, defaults, ranges),
@@ -160,8 +165,12 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   beside the charge history so they survive a reboot, and mirrored to memcache for the
   tuning page. "Clear learned feed rate" deletes the memcache copy and sends the daemon a
   `reset_learned` command through the `TRICKLER_COMMAND` memcache key, which is also where
-  Phase 2's "calibrate" will go. Every pulse is in `pulses.csv`; `/app/history` fits rate
+  the calibration commands go. Every pulse is in `pulses.csv`; `/app/history` fits rate
   and spin-up from it, so bench evidence no longer has to be pasted from the journal.
+  A profile's `learned.json` entry is shared: the model owns `rate` / `fast_rate` /
+  `updated`, the routine owns `calibration`. `FeedModel._write` merges, and `reset` keeps
+  the calibration block -- the first version replaced the entry whole, and the first
+  pulse learned after a calibration erased its results.
 - Reading pulse logs: `remainder: R ... scale: W ... pulsed T s -> D (rate X/s)` -- R is
   before the pulse, W after, and X is the **fine** rate only. Fast-pulse learning isn't
   logged; `pulses.csv` has both, with the rate at the speed each pulse used, and a

@@ -83,6 +83,7 @@ the SD card.
 | `/app/` | Control panel: set target weight, toggle auto mode |
 | `/app/config/` | Tuning page: trickler settings, live scale readout, learned feed rate, powder profiles |
 | `/app/history` | Every charge thrown, with mean error, spread, and how many were in tolerance |
+| `/app/calibrate/` | Calibrate for a powder: measure how it pulses, get recommended settings, apply and save them |
 | `/servo/` | Servo control panel, for setting up the powder measure |
 | `/opentrickler.html` | Trickler log |
 | `/screen.html` | Screen log |
@@ -91,6 +92,36 @@ the SD card.
 
 Changes made on the tuning page apply to the **next charge** without restarting anything,
 and are written back to `opentrickler_config.ini` so they survive a reboot.
+
+## Calibrating for a powder
+
+Powders feed differently — a stick powder and a ball powder through the same trickler can
+differ several times over in how much a pulse drops — so the final-approach settings that
+suit one are wrong for another. `/app/calibrate/` measures the powder in the hopper and
+proposes settings for it:
+
+1. Put an empty cup on the pan, switch auto mode off, and open the page. Pick the powder
+   profile (or type a new name), enter how many grains the cup holds, and press **Start**.
+2. Trickler 1 runs on its own — the tricklers are the same hardware, and the powder
+   measure never runs, so the only powder on the scale is what the trickler drops. The
+   routine primes the tube, steps the drive down to find where the motor stalls, then
+   fires every combination of the speeds and lengths in `[calibration]` (3 × 3 × 10 pulses
+   by default, about two minutes), weighing each pulse the way a charge does.
+3. When the cup is nearly full the routine pauses and the screen shows **EMPTY CUP**: tip
+   the powder back into the hopper, put the cup back, press **Continue**.
+4. It then simulates charges against what it measured, through the same final-approach
+   code a real charge runs, and shows the fastest settings whose predicted heavy rate is
+   no more than one in four, beside what the current settings would do and three
+   runners-up. Edit anything you like, then **Apply**: the values go live for the next
+   charge, are written to the profile (or to `[trickler]` with no name), and the profile's
+   learned feed rates are seeded from the calibration. The results also stay with the
+   profile in `learned.json`, so the page shows them again later.
+5. The prediction is only a prediction. Throw half a dozen charges and look at the
+   **Landed** column on the history page; that is what decides whether the settings stay.
+
+The routine is optional. Tuning by hand — set values on the tuning page, throw charges,
+judge them by what landed — works as it always did, and the calibration page's table is
+there to be edited before applying.
 
 ## Install
 
@@ -157,6 +188,8 @@ version added. The sections worth knowing:
   (`/var/lib/opentrickler/charges.csv`, `pulses.csv` and `learned.json` by default,
   outside the repo so a `git pull` can't disturb them) and how many rows to keep.
 - `[profiles]` — the powder profile in use; each is a `[profile:Name]` section.
+- `[calibration]` — the speeds and pulse lengths the calibration routine sweeps, pulses
+  per cell, and the container capacity the page last used.
 - `[servo]` — powder measure travel and pulse widths, in **microseconds**. Set
   `servo_angle` from the servo page: work up until the measure gives a full drop, and
   stop there rather than driving it into its stop.

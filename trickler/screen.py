@@ -73,11 +73,20 @@ class MiniPiTFTApp:
         # Set when the trickler gives up on a jammed powder measure. Read from memcache
         # in the run loop, like the two values above, since the trickler is what sets it.
         self.dump_error = self.get_memcache_value(self.constants.DUMP_ERROR.value, '')
+        # What the calibration routine is doing, if it is running: the band at the top
+        # says so, and says when it is waiting for the container to be emptied, so the
+        # person at the bench does not need the browser open to know.
+        self.calibration_key = helpers.calibration_status_key(self.constants)
+        self.calibration_band = self.band_for_calibration(
+            self.get_memcache_value(self.calibration_key, None))
 
         # Loaded once. update_display() used to re-parse the font file from the SD card
         # on every redraw, and the loop below now redraws whenever anything changes.
         self.font = ImageFont.truetype(self.font_path, 40)
         self.alert_font = ImageFont.truetype(self.font_path, 20)
+        # One size down for the one word that will not fit at 20: CALIBRATING measures
+        # 149px at 20pt on a 135px panel, 119px at 16.
+        self.band_font = ImageFont.truetype(self.font_path, 16)
 
         self.digit_index = 0  # To track which digit is being edited
 
@@ -96,17 +105,20 @@ class MiniPiTFTApp:
         image = Image.new('RGB', (self.disp.width, self.disp.height), self.colors['BLACK'])
         draw = ImageDraw.Draw(image)
         
-        # Whatever else is on the screen, say when the machine has stood down on a jam.
-        # Two short lines, because the panel is only 135px wide: at 20pt the widest of
-        # them measures 109px, while 'MEASURE JAMMED' on one line needs 188px. The full
-        # explanation stays on the control panel, which has room for a sentence.
-        if self.dump_error:
-            draw.rectangle((0, 0, self.disp.width, 52), fill=self.colors['RED'])
-            for line, line_y in (('MEASURE', 4), ('JAMMED', 28)):
-                line_bbox = draw.textbbox((0, 0), line, font=self.alert_font)
+        # Whatever else is on the screen, say when the machine has stood down on a jam,
+        # or is calibrating and may be waiting on the person at the bench. Two short
+        # lines, because the panel is only 135px wide: at 20pt the widest of them
+        # measures 109px, while 'MEASURE JAMMED' on one line needs 188px. The full
+        # explanation stays on the web pages, which have room for a sentence.
+        band = self.band()
+        if band:
+            colour, lines = band
+            draw.rectangle((0, 0, self.disp.width, 52), fill=colour)
+            font = self.alert_font if len(lines) > 1 else self.band_font
+            for line, line_y in zip(lines, (4, 28) if len(lines) > 1 else (16,)):
+                line_bbox = draw.textbbox((0, 0), line, font=font)
                 line_x = (self.disp.width - (line_bbox[2] - line_bbox[0])) // 2
-                draw.text((line_x, line_y), line, font=self.alert_font,
-                          fill=self.colors['WHITE'])
+                draw.text((line_x, line_y), line, font=font, fill=self.colors['WHITE'])
 
         # Draw the target weight
         font = self.font
@@ -131,6 +143,33 @@ class MiniPiTFTApp:
             draw.rectangle((10, 200, 60, 230), outline=self.colors['RED'], fill=self.colors['RED'])
         
         self.disp.image(image)
+
+    def band(self):
+        """The alert band to draw, as (colour, lines), or None for the normal screen.
+
+        A jam wins over a calibration: the routine never starts while the machine has
+        stood down, so if both are set the jam is the newer news.
+        """
+        if self.dump_error:
+            return self.colors['RED'], ('MEASURE', 'JAMMED')
+        return self.calibration_band
+
+    def band_for_calibration(self, status):
+        """What the band says about a calibration status, or None once it is finished.
+
+        Amber while the routine runs on its own; red when it has stopped and is waiting
+        for a hand -- the container emptied, the pan put back -- since that is the one
+        moment the person at the bench has to notice. Nothing once it is done: the
+        results are on the page, and a band that never cleared would just be ignored.
+        """
+        if not isinstance(status, dict) or status.get('finished', True):
+            return None
+        prompt = status.get('prompt')
+        if prompt == 'empty_container':
+            return self.colors['RED'], ('EMPTY', 'CUP')
+        if prompt == 'pan_missing':
+            return self.colors['RED'], ('PAN', 'MISSING')
+        return self.colors.get('AMBER', self.colors['RED']), ('CALIBRATING',)
 
     def increment_digit(self):
         target_weight_str = f"{self.target_weight:05.2f}"
@@ -198,6 +237,18 @@ class MiniPiTFTApp:
         dump_error = self.memcache_client.get(self.constants.DUMP_ERROR.value) or ''
         if bool(dump_error) != bool(self.dump_error):
             self.dump_error = dump_error
+            changed = True
+
+        try:
+            status = self.memcache_client.get(self.calibration_key)
+        except Exception:
+            # Written by another process as a pickled dict; one that will not unpickle
+            # here should not take the screen's loop down with it.
+            logging.debug('Could not read the calibration status.', exc_info=True)
+            status = None
+        band = self.band_for_calibration(status)
+        if band != self.calibration_band:
+            self.calibration_band = band
             changed = True
 
         return changed
@@ -304,7 +355,9 @@ if __name__ == "__main__":
         'WHITE': (255, 255, 255),
         'BLACK': (0, 0, 0),
         'RED': (255, 0, 0),
-        'GREEN': (0, 255, 0)
+        'GREEN': (0, 255, 0),
+        # The calibration band: running, not alarmed.
+        'AMBER': (255, 160, 0),
     }
     
     logging.info('Screen is setup.')
