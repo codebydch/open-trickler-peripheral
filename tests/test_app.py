@@ -335,7 +335,7 @@ class CalibratePageTest(AppTestCase):
     def test_start_sends_the_request_and_remembers_the_capacity(self):
         body = self.client.post('/app/calibrate/start', data={
             'profile': '', 'new_profile': 'Varget', 'capacity': '180',
-            'pulses_per_cell': '12'}).get_data(as_text=True)
+            'pulses_per_cell': '12'}, follow_redirects=True).get_data(as_text=True)
         self.assertEqual(self.memcache['trickler_command'], {
             'command': 'calibrate', 'profile': 'Varget', 'capacity': 180.0,
             'pulses_per_cell': 12})
@@ -426,7 +426,8 @@ class CalibratePageTest(AppTestCase):
         form = {key: str(value) for key, value in
                 self.results()['recommendation']['recommended']['settings'].items()}
         form['save_profile'] = 'Varget'
-        body = self.client.post('/app/calibrate/apply', data=form).get_data(as_text=True)
+        body = self.client.post('/app/calibrate/apply', data=form,
+                                follow_redirects=True).get_data(as_text=True)
         self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '45')
         self.assertEqual(self.memcache['trickler_settings']['stall_pwm'], '18')
         self.assertEqual(self.memcache['active_profile'], 'Varget')
@@ -451,9 +452,36 @@ class CalibratePageTest(AppTestCase):
 
     def test_apply_clamps_like_the_tuning_page(self):
         body = self.client.post('/app/calibrate/apply', data={
-            'pulse_pwm': '999', 'save_profile': ''}).get_data(as_text=True)
+            'pulse_pwm': '999', 'save_profile': ''}, follow_redirects=True).get_data(as_text=True)
         self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '100')
         self.assertIn('adjusted', body)
+
+    def test_every_post_that_acts_leaves_the_browser_on_a_get(self):
+        """The page fetches itself again when the routine finishes. On the first bench
+        run it was left on the result of the Start form, and that fetch re-submitted
+        it: the moment one calibration was done, another began."""
+        for path, form in (('/app/calibrate/start', {'profile': 'Varget', 'capacity': '200',
+                                                     'pulses_per_cell': '10'}),
+                           ('/app/calibrate/apply', {'pulse_pwm': '30', 'save_profile': 'Varget'}),
+                           ('/app/calibrate/dismiss', {})):
+            self.memcache.clear()
+            response = self.client.post(path, data=form)
+            self.assertEqual(response.status_code, 302, path)
+            self.assertIn('/app/calibrate/?', response.headers['Location'], path)
+            self.assertIn('profile=Varget', response.headers['Location'], path)
+        self.client.post('/app/calibrate/start', data={
+            'profile': '', 'capacity': '200', 'pulses_per_cell': '10'})
+        response = self.client.post('/app/calibrate/abort')
+        self.assertEqual(response.status_code, 302, 'withdrawing a request')
+
+    def test_the_page_refreshes_itself_with_a_get_not_a_reload(self):
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertNotIn('reload(', body)
+        self.assertIn("location.replace(", body)
+
+    def test_the_notice_survives_the_redirect(self):
+        body = self.client.get('/app/calibrate/?notice=Hello+there').get_data(as_text=True)
+        self.assertIn('Hello there', body)
 
     def test_the_tuning_page_links_here(self):
         body = self.client.get('/app/config/').get_data(as_text=True)

@@ -247,10 +247,21 @@ def select_profile(name):
     return ''
 
 
+def back_to_calibrate(profile, notice):
+    """Redirects to the page after a POST, so the browser is left on a GET.
+
+    The page reloads itself when the routine finishes; a reload of a POST result
+    re-submits the form, and the first bench run of the page started a second
+    calibration that way the moment the first one was done.
+    """
+    return redirect(url_for('calibrate_page', profile=profile, notice=notice))
+
+
 @app.route('/app/calibrate/')
 def calibrate_page():
     """Calibrating the trickler for a powder: start, follow, review and apply."""
-    return render_calibrate(profile=request.args.get('profile'))
+    return render_calibrate(profile=request.args.get('profile'),
+                            notice=request.args.get('notice') or None)
 
 
 @app.route('/app/calibrate/status')
@@ -313,7 +324,7 @@ def calibrate_start():
     send_command('calibrate', profile=name, capacity=capacity, pulses_per_cell=pulses_per_cell)
     logging.info('Requested a calibration: profile=%r capacity=%s pulses_per_cell=%s',
                  name, capacity, pulses_per_cell)
-    return render_calibrate(profile=name, notice=notice)
+    return back_to_calibrate(name, notice)
 
 
 @app.route('/app/calibrate/continue', methods=['POST'])
@@ -330,7 +341,7 @@ def calibrate_abort():
         # The daemon has not picked it up; there is nothing to abort but the request.
         memcache_client.delete(helpers.command_key(constants))
         memcache_client.delete(helpers.calibration_status_key(constants))
-        return render_calibrate(notice='Request withdrawn.')
+        return back_to_calibrate(status.get('profile') or active_profile(), 'Request withdrawn.')
     send_command('calibrate_abort')
     return redirect(url_for('calibrate_page'))
 
@@ -339,7 +350,8 @@ def calibrate_abort():
 def calibrate_dismiss():
     """Clears a finished routine's report. Its record in learned.json stays."""
     memcache_client.delete(helpers.calibration_status_key(constants))
-    return render_calibrate(notice='Dismissed. The results are still in the record for the profile.')
+    return back_to_calibrate(active_profile(),
+                             'Dismissed. The results are still in the record for the profile.')
 
 
 @app.route('/app/calibrate/apply', methods=['POST'])
@@ -374,7 +386,7 @@ def calibrate_apply():
                  pulse_pwm=float(values['pulse_pwm']), pulse_fast_pwm=float(values['pulse_fast_pwm']))
     if errors:
         notice += ' Some values were adjusted: ' + ' '.join(errors.values())
-    return render_calibrate(profile=name, notice=notice, errors=errors)
+    return back_to_calibrate(name, notice)
 
 
 def render_config(errors=None, notice=None):

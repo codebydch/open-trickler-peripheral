@@ -328,8 +328,9 @@
 
     <script>
       // Follow the routine while it runs. The page is rendered with whatever was known
-      // when it loaded; once the daemon reports it finished, reload once so the results
-      // and the Apply form render server-side.
+      // when it loaded; once the daemon reports it finished, fetch the page again (a GET,
+      // never a reload: a reload of the Start form's result re-submits it) so the
+      // results and the Apply form render server-side.
       var wasRunning = {{ 'true' if running else 'false' }};
       var PHASES = {
         requested: 'Requested', prime: 'Priming the tube', stall: 'Finding the stall speed',
@@ -366,7 +367,8 @@
               }
               wasRunning = true;
             } else if (wasRunning) {
-              window.location.reload();
+              window.location.replace(
+                '/app/calibrate/?profile=' + encodeURIComponent(data.profile || ''));
             }
           })
           .catch(function () {});
