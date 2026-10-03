@@ -208,10 +208,19 @@ other, and a mismatched set fails in ways that are hard to read.
 
 ## Developer setup
 
+On a Pi, where the full requirements install:
+
 ```bash
 sudo apt install memcached
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-to-freeze.txt
+```
+
+Anywhere else, install only what the tests import -- `requirements-to-freeze.txt` is the
+Pi's list, C extensions included:
+
+```bash
+python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
 ```
 
 Run the tests from the repository root:
@@ -225,8 +234,8 @@ a simulated machine, so they run anywhere and cover the parts that are awkward t
 on the bench: frame parsing, motor clamping, every exit path from a charge, and whether a
 charge actually lands on target. `tests/fakes.py` holds the simulated hardware.
 
-Run them on **Python 3.13** if you can, which is what Raspberry Pi OS Trixie ships. A
-passing run on an older interpreter is not proof: stacking `@classmethod` on `@property`
+Run them on **Python 3.13**, which is what Raspberry Pi OS Trixie ships and what CI runs.
+A passing run on an older interpreter is not proof: stacking `@classmethod` on `@property`
 worked until 3.13 removed it, and the scales module hit that on Trixie and nowhere else.
 
 The screen is covered too, by stubbing the two Pi-only modules `screen.py` imports and

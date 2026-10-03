@@ -42,9 +42,12 @@ EMPTY_SECTION = configparser.ConfigParser()['DEFAULT']
 # config file when the scale is set to grams.
 GRAINS_PER_GRAM = decimal.Decimal('15.4323583529')
 
-# How strongly each measured pulse pulls the learned feed rate toward what was just
-# observed. Low enough to ride out one odd reading, high enough to adapt to a different
-# powder within a few pulses.
+# How strongly the rate measured over the recent pulse window pulls the stored feed rate
+# toward it, once a rate has been measured at that speed. Low enough to ride out one odd
+# window, high enough to follow a different powder within a few pulses. Note the window
+# is rebuilt empty for every charge, so the first update of a charge is one pulse's
+# worth of evidence blended at this weight -- which is how one four-grain burst on a
+# short pulse moved a stored 0.302 gn/s to 0.665. Bounding that is Phase 2 work.
 PULSE_RATE_LEARN = 0.4
 
 # Floor for the learned feed rate, so a run of pulses that delivered nothing can't drive
@@ -64,14 +67,17 @@ FAST_PROBE_SAFETY = 4
 # back with nothing measurable. Bounded so a probe can never spoil a charge.
 MAX_FAST_PROBE = 8
 
-# How many recent pulses the feed rate is measured over. Long enough that whole grains
-# landing at random average out, short enough to follow a hopper that is emptying.
-RATE_WINDOW_PULSES = 6
+# How many recent pulses the pulse feeder measures its feed rate over. Long enough that
+# whole grains landing at random average out, short enough to follow a hopper that is
+# emptying. Not the `rate_window` setting: that one counts scale readings and belongs to
+# FeedRateEstimator, which runs the continuous phases.
+PULSE_RATE_WINDOW = 6
 
 # How many scale divisions from target the feeder stops sizing pulses and just places one
 # grain at a time. Aiming below this is arithmetic about doses the machine cannot deliver.
-# Measured across 45 simulated charges spanning a 60x range of seed rates: at 5 divisions
-# nothing landed more than one grain over, while 3 and 8 both produced charges that did.
+# Chosen in the simulator (tests/fakes.py), not on the bench: across 45 simulated charges
+# spanning a 60x range of seed rates, at 5 divisions nothing landed more than one grain
+# over, while 3 and 8 both produced charges that did.
 FINAL_GRAINS = 5
 
 # Backstop on the final approach. Even with the give-up counters above, a pathological
@@ -204,9 +210,6 @@ class PulseFeeder:
                 self._fast_rate = max(float(learned_fast), MIN_PULSE_RATE)
         self.empty_pulses = 0
         self.pulses = 0
-        # How many minimum-length pulses the next fast probe runs for. Doubles whenever a
-        # probe lands under the scale's resolution, since a dose that reads as zero
-        # measures nothing.
         # How far the guessed rate is discounted when sizing a probe. Doubles every time
         # a probe delivers too little to measure, because that is evidence the guess is
         # too high -- and a probe sized from a rate several times too high is far too
@@ -217,8 +220,8 @@ class PulseFeeder:
         # individual dose is 0, one grain, or three, and none of those is the feed rate.
         # Summing the window lets the zeros and the clumps cancel, which is the only
         # unbiased way to measure a granular process.
-        self._window = {False: collections.deque(maxlen=RATE_WINDOW_PULSES),
-                        True: collections.deque(maxlen=RATE_WINDOW_PULSES)}
+        self._window = {False: collections.deque(maxlen=PULSE_RATE_WINDOW),
+                        True: collections.deque(maxlen=PULSE_RATE_WINDOW)}
 
     @property
     def settings(self):
@@ -287,6 +290,12 @@ class PulseFeeder:
         it has fired anything: seeded at 3 gn/s, a pan 0.04 gn short was called complete
         on the strength of a number nothing had measured. A guess may not widen the
         finish line -- it can only be narrowed to what the scale can resolve.
+
+        With the shipped settings the `min_dose` term never decides anything: the shortest
+        pulse moves 0.03 s x 0.217 gn/s, well under a division, so `min_dose` is pinned to
+        the division and half of it is below `cutoff_weight`. In practice this rule is
+        `remainder <= cutoff_weight`. The term only matters on a machine whose shortest
+        pulse drops more than two divisions.
         """
         floor = max(self._settings.cutoff_weight, self.resolution / 2)
         if not self._rate_measured:

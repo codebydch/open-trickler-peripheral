@@ -66,7 +66,9 @@ check_config() {
   local key
   while IFS= read -r key; do
     grep -qE "^[[:space:]]*${key}[[:space:]]*=" "${live}" || added+=("${key}")
-  done < <(grep -oE '^[a-z_]+[[:space:]]*=' "${example}" | tr -d ' =' | sort -u)
+  # Upper-case too: the [memcache_vars] keys are, and a daemon built against a config
+  # that lacks one of them fails on first use with an AttributeError.
+  done < <(grep -oE '^[A-Za-z_]+[[:space:]]*=' "${example}" | tr -d ' =' | sort -u)
 
   if [[ ${#added[@]} -eq 0 ]]; then
     skip "no new settings."

@@ -7,7 +7,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.11"]
+        # 3.13 is what Raspberry Pi OS Trixie ships, and the interpreter that broke the
+        # scales module when every older one passed (see classproperty in scales.py).
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
@@ -15,9 +17,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        # Only what the tests import. The screen libraries (Pillow, Adafruit Blinka) are
-        # Pi-only and screen.py is not under test, so the full requirements file is not
-        # installable on a runner.
-        run: pip install pyserial gpiozero pigpio pymemcache flask
+        # Only what the tests import, not requirements-to-freeze.txt: that is the Pi's
+        # list, C extensions included, and does not install on a runner. The screen tests
+        # stub the Pi-only modules themselves but draw into a real Pillow image with the
+        # DejaVu font, and skip if either is missing -- so both are installed here, or the
+        # screen would never actually be tested.
+        run: |
+          sudo apt-get install -y fonts-dejavu-core
+          pip install pyserial gpiozero pymemcache flask pillow
       - name: Run tests
         run: python -m unittest discover -t . -s tests -v

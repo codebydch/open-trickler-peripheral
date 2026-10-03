@@ -75,10 +75,11 @@ defaults, so they keep testing the same thing when a default moves.
   trickled up; a heavy one has to be dumped. The owner's call.
 - **`pulse_on_time = 0.4`** -- at 0.2 the cap bound nearly every pulse; past 0.4 the gain
   flattens and clumps start to overshoot.
-- **Two-speed pulsing is off** (`pulse_fast_pwm` = `pulse_pwm`). Tested: 45% drive gave
-  about 1.1x the powder per pulse of 30%, not the 2.5x drive suggests, and the fast pulses
-  load the tube so the first fine pulse bursts. Note the shipped example still has 45/25;
-  the owner runs 30/30 and is changing such values by hand.
+- **Two-speed pulsing was tested and found not to pay**: 45% drive gave about 1.1x the
+  powder per pulse of 30%, not the 2.5x drive suggests, and the fast pulses load the tube
+  so the first fine pulse bursts. The code stays in, dormant when `pulse_fast_pwm` =
+  `pulse_pwm`. The owner is currently running the shipped 25/45 and changes such values by
+  hand on the tuning page; don't move the shipped defaults without asking.
 - An "E" on the scale when the pan is lifted was a scale fault, fixed by resetting the
   scale -- not code.
 
