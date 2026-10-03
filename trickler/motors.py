@@ -295,7 +295,6 @@ if __name__ == '__main__':
     if args.max_pulse_width is not None:
         kwargs['max_pulse_width'] = args.max_pulse_width
 
-
     # Setup memcache.
     memcache_client = helpers.get_mc_client()
 
