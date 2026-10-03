@@ -274,3 +274,187 @@ class ProfilePageTest(AppTestCase):
         status = json.loads(self.client.get('/app/status').get_data(as_text=True))
         self.assertEqual(status['pulse_rate'], 0.44)
         self.assertEqual(status['profile'], 'Varget')
+
+
+class CalibratePageTest(AppTestCase):
+    """Starting, following, reviewing and applying a calibration from the browser."""
+
+    def setUp(self):
+        super().setUp()
+        self.directory = tempfile.mkdtemp()
+        self.learned = os.path.join(self.directory, 'learned.json')
+        helpers.update_ini_section(self.ini, 'history', {
+            'enabled': 'True', 'path': os.path.join(self.directory, 'charges.csv'),
+            'learned_path': self.learned})
+        app.config.read(self.ini)
+
+    def tearDown(self):
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    @staticmethod
+    def results(profile='Varget', **extra):
+        """A finished routine's results, shaped as calibrate.py publishes them."""
+        def candidate(pwm, fast, seconds, heavy, meets):
+            return {'settings': {'pulse_pwm': pwm, 'pulse_fast_pwm': fast,
+                                 'pulse_fast_until': 0.1, 'pulse_on_time': 0.25,
+                                 'pulse_trickle_weight': 0.5, 'pulse_aim': 0.85},
+                    'prediction': {'seconds': seconds, 'heavy': heavy, 'light': 0.3,
+                                   'unfinished': 0, 'pulses': 6.0},
+                    'meets_limit': meets}
+        recommended = candidate(45.0, 45.0, 12.8, 0.22, True)
+        recommended['settings'].update(stall_pwm=18.0, pulse_rate=0.25, pulse_dead_time=0.12)
+        return dict({
+            'profile': profile, 'capacity': 180.0, 'stall_pwm': 18.0,
+            'continuous_rate': 0.31, 'pulses': 90,
+            'cells': [{'speed': 30.0, 'on_time': 0.25, 'pulses': 10, 'zeros': 0.4,
+                       'mean_dose': 0.034, 'bursts': 0.1, 'max_dose': 0.08,
+                       'mean_tail': 0.004}],
+            'rates': {'30.0': 0.15, '45.0': 0.25},
+            'dead_times': {'30.0': 0.11, '45.0': 0.12},
+            'recommendation': {
+                'heavy_limit': 0.25,
+                'current': candidate(30.0, 45.0, 19.1, 0.3, False),
+                'recommended': recommended,
+                'runners_up': [candidate(30.0, 45.0, 14.0, 0.2, True)],
+                'evaluated': 162,
+            }}, **extra)
+
+    def status(self, phase='sweep', finished=False, prompt=None, results=None):
+        self.memcache['calibration_status'] = {
+            'phase': phase, 'progress': 0.5, 'message': 'Sweeping.', 'prompt': prompt,
+            'pulses_done': 40, 'pulses_total': 90, 'profile': 'Varget',
+            'results': results, 'error': None, 'finished': finished}
+
+    def test_the_page_renders_with_nothing_to_show(self):
+        page = self.client.get('/app/calibrate/')
+        self.assertEqual(page.status_code, 200)
+        body = page.get_data(as_text=True)
+        self.assertIn('No calibration', body)
+        self.assertIn('value="200"', body, 'the shipped capacity')
+
+    def test_start_sends_the_request_and_remembers_the_capacity(self):
+        body = self.client.post('/app/calibrate/start', data={
+            'profile': '', 'new_profile': 'Varget', 'capacity': '180',
+            'pulses_per_cell': '12'}).get_data(as_text=True)
+        self.assertEqual(self.memcache['trickler_command'], {
+            'command': 'calibrate', 'profile': 'Varget', 'capacity': 180.0,
+            'pulses_per_cell': 12})
+        self.assertEqual(self.memcache['active_profile'], 'Varget')
+        self.assertEqual(self.memcache['calibration_status']['phase'], 'requested')
+        self.assertIn('requested', body)
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(self.ini)
+        self.assertEqual(config['calibration']['capacity'], '180')
+
+    def test_start_needs_a_sensible_capacity(self):
+        body = self.client.post('/app/calibrate/start', data={
+            'profile': '', 'capacity': '5', 'pulses_per_cell': '10'}).get_data(as_text=True)
+        self.assertNotIn('trickler_command', self.memcache)
+        self.assertIn('Not started', body)
+
+    def test_start_is_refused_while_one_is_running(self):
+        self.status()
+        body = self.client.post('/app/calibrate/start', data={
+            'profile': '', 'capacity': '200', 'pulses_per_cell': '10'}).get_data(as_text=True)
+        self.assertNotIn('trickler_command', self.memcache)
+        self.assertIn('already running', body)
+
+    def test_start_is_refused_with_auto_mode_on(self):
+        self.memcache['auto_mode'] = True
+        body = self.client.post('/app/calibrate/start', data={
+            'profile': '', 'capacity': '200', 'pulses_per_cell': '10'}).get_data(as_text=True)
+        self.assertNotIn('trickler_command', self.memcache)
+        self.assertIn('auto mode off', body)
+
+    def test_the_status_endpoint_mirrors_the_daemon(self):
+        self.status(prompt='empty_container')
+        self.memcache['scale_weight'] = D('178.42')
+        status = json.loads(self.client.get('/app/calibrate/status').get_data(as_text=True))
+        self.assertEqual(status['phase'], 'sweep')
+        self.assertEqual(status['prompt'], 'empty_container')
+        self.assertTrue(status['running'])
+        self.assertEqual(status['scale_weight'], '178.42')
+
+    def test_continue_and_abort_are_commands(self):
+        self.status()
+        self.client.post('/app/calibrate/continue')
+        self.assertEqual(self.memcache['trickler_command'], {'command': 'calibrate_continue'})
+        self.client.post('/app/calibrate/abort')
+        self.assertEqual(self.memcache['trickler_command'], {'command': 'calibrate_abort'})
+
+    def test_aborting_a_request_the_daemon_has_not_taken_withdraws_it(self):
+        self.client.post('/app/calibrate/start', data={
+            'profile': '', 'capacity': '200', 'pulses_per_cell': '10'})
+        self.client.post('/app/calibrate/abort')
+        self.assertNotIn('trickler_command', self.memcache)
+        self.assertNotIn('calibration_status', self.memcache)
+
+    def test_results_render_from_the_daemon_report(self):
+        self.status(phase='done', finished=True, results=self.results())
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('id="cells"', body)
+        self.assertIn('id="recommendation"', body)
+        self.assertIn('12.8', body, 'the predicted seconds')
+        self.assertIn('value="180"', body, 'the capacity the routine ran with')
+        self.assertIn('Discard', body)
+
+    def test_results_render_from_the_record_when_memcache_has_forgotten(self):
+        helpers.write_json(self.learned, {'Varget': {
+            'rate': 0.15, 'calibration': self.results(updated='2026-10-03T21:00:00')}})
+        body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
+        self.assertIn('Last calibration', body)
+        self.assertIn('2026-10-03T21:00:00', body)
+        self.assertNotIn('Discard', body, 'nothing in memcache to discard')
+
+    def test_a_failed_run_is_reported(self):
+        self.memcache['calibration_status'] = {
+            'phase': 'failed', 'finished': True, 'prompt': None, 'results': None,
+            'error': 'No powder arrived in 20 s.', 'message': 'Failed.', 'progress': 0.1}
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('No powder arrived', body)
+
+    def test_dismiss_clears_the_report_but_not_the_record(self):
+        helpers.write_json(self.learned, {'Varget': {'calibration': self.results()}})
+        self.status(phase='done', finished=True, results=self.results())
+        self.client.post('/app/calibrate/dismiss')
+        self.assertNotIn('calibration_status', self.memcache)
+        self.assertIn('calibration', helpers.read_json(self.learned)['Varget'])
+
+    def test_apply_puts_the_values_in_force_and_saves_them_to_the_profile(self):
+        self.status(phase='done', finished=True, results=self.results())
+        form = {key: str(value) for key, value in
+                self.results()['recommendation']['recommended']['settings'].items()}
+        form['save_profile'] = 'Varget'
+        body = self.client.post('/app/calibrate/apply', data=form).get_data(as_text=True)
+        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '45')
+        self.assertEqual(self.memcache['trickler_settings']['stall_pwm'], '18')
+        self.assertEqual(self.memcache['active_profile'], 'Varget')
+        self.assertEqual(self.memcache['trickler_command'], {
+            'command': 'calibrate_apply', 'profile': 'Varget',
+            'pulse_pwm': 45.0, 'pulse_fast_pwm': 45.0})
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(self.ini)
+        self.assertEqual(config['profile:Varget']['pulse_pwm'], '45')
+        self.assertEqual(config['profile:Varget']['pulse_trickle_weight'], '0.5')
+        self.assertIn('[profile:Varget]', body)
+
+    def test_apply_without_a_name_writes_the_plain_section(self):
+        form = {'pulse_pwm': '35', 'save_profile': ''}
+        self.client.post('/app/calibrate/apply', data=form)
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(self.ini)
+        self.assertEqual(config['trickler']['pulse_pwm'], '35')
+        self.assertEqual(self.memcache['trickler_command']['profile'], '')
+
+    def test_apply_clamps_like_the_tuning_page(self):
+        body = self.client.post('/app/calibrate/apply', data={
+            'pulse_pwm': '999', 'save_profile': ''}).get_data(as_text=True)
+        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '100')
+        self.assertIn('adjusted', body)
+
+    def test_the_tuning_page_links_here(self):
+        body = self.client.get('/app/config/').get_data(as_text=True)
+        self.assertIn('/app/calibrate/', body)

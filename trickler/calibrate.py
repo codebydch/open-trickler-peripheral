@@ -89,13 +89,12 @@ def calibration_settings(config):
         second_pass=number('second_pass', 300, int))
 
 
-DEFAULT_STATUS_KEY = 'calibration_status'
+DEFAULT_STATUS_KEY = helpers.DEFAULT_CALIBRATION_STATUS_KEY
 
 
 def status_key(constants):
     """The memcache key the routine reports under; defaulted like command_key()."""
-    member = getattr(constants, 'CALIBRATION_STATUS', None)
-    return member.value if member is not None else DEFAULT_STATUS_KEY
+    return helpers.calibration_status_key(constants)
 
 
 class Calibration:
@@ -176,6 +175,7 @@ class Calibration:
             'pulses_done': self._index,
             'pulses_total': len(self._plan),
             'profile': self.settings.profile,
+            'capacity': self.capacity,
             'stall_pwm': self.stall_pwm,
             'continuous_rate': None if self.continuous_rate is None else round(self.continuous_rate, 4),
             'results': self.results,
@@ -444,6 +444,7 @@ class Calibration:
             rates[speed] = max(delivered / max(moving, 1e-6), main.MIN_PULSE_RATE)
         self.results = {
             'profile': self.settings.profile,
+            'capacity': self.capacity,
             'stall_pwm': self.stall_pwm,
             'continuous_rate': self.continuous_rate,
             'cells': [{'speed': speed, 'on_time': duration, **stats}

@@ -131,6 +131,252 @@ def recorded_pulses(profile='', source=''):
     return rows
 
 
+# The settings a calibration recommends, in the order the page shows them. The first six
+# are what the recommender moves (powder_model.RECOMMENDED_KEYS, not imported here: that
+# module imports the daemon, hardware libraries and all); the last three are what the
+# routine measured and the recommendation carries along.
+CALIBRATION_FIELDS = ('pulse_pwm', 'pulse_fast_pwm', 'pulse_fast_until', 'pulse_on_time',
+                      'pulse_trickle_weight', 'pulse_aim', 'stall_pwm', 'pulse_rate',
+                      'pulse_dead_time')
+# Phases the daemon reports while the routine is actually running. 'requested' is this
+# app's own placeholder between Start and the daemon's first report.
+CALIBRATION_RUNNING = ('prime', 'stall', 'reprime', 'sweep', 'paused', 'fit', 'recommending')
+DEFAULT_CAPACITY = 200.0
+
+
+def calibration_status():
+    """What the calibration routine last reported, or None if nothing has."""
+    status = safe_get(helpers.calibration_status_key(constants))
+    return status if isinstance(status, dict) else None
+
+
+def calibration_running(status):
+    """Whether a routine is under way, as far as this app can tell."""
+    return bool(status) and (not status.get('finished', True)
+                             and (status.get('phase') in CALIBRATION_RUNNING
+                                  or status.get('phase') == 'requested'))
+
+
+def last_calibration(profile):
+    """A profile's stored calibration record from learned.json, or None.
+
+    The daemon owns that file; this only reads it, so the page can still show the last
+    results after memcached has forgotten them (a reboot, usually).
+    """
+    path = helpers.history_files(config).learned
+    if not path:
+        return None
+    entry = helpers.read_json(path).get(profile, {})
+    results = entry.get('calibration') if isinstance(entry, dict) else None
+    return results if isinstance(results, dict) else None
+
+
+def configured_capacity():
+    """The container capacity last used, from [calibration], else the shipped guess."""
+    try:
+        return float(config.get('calibration', 'capacity', fallback=DEFAULT_CAPACITY))
+    except ValueError:
+        return DEFAULT_CAPACITY
+
+
+def configured_pulses_per_cell():
+    try:
+        return int(config.get('calibration', 'pulses_per_cell', fallback=10))
+    except ValueError:
+        return 10
+
+
+def render_calibrate(profile=None, notice=None, errors=None):
+    """Renders the calibration page for a profile, with the latest results it has."""
+    profile = active_profile() if profile is None else profile
+    status = calibration_status()
+    results = None
+    source = None
+    if status and status.get('phase') == 'done' and isinstance(status.get('results'), dict):
+        results, source = status['results'], 'status'
+    else:
+        stored = last_calibration(profile)
+        if stored:
+            results, source = stored, 'stored'
+    capacity = configured_capacity()
+    if results and results.get('capacity'):
+        capacity = float(results['capacity'])
+    recommendation = results.get('recommendation') if results else None
+    current, _ = current_trickler_settings()
+    proposed = {}
+    if recommendation and isinstance(recommendation.get('recommended'), dict):
+        proposed = dict(recommendation['recommended'].get('settings') or {})
+    for name in CALIBRATION_FIELDS:
+        proposed.setdefault(name, current.get(name))
+    labels = {setting.name: setting for setting in helpers.TRICKLER_SETTINGS}
+    return render_template(
+        'calibrate.html',
+        profiles=helpers.list_profiles(config),
+        profile=profile,
+        status=status,
+        running=calibration_running(status),
+        results=results,
+        results_source=source,
+        recommendation=recommendation,
+        proposed=proposed,
+        current=current,
+        fields=[labels[name] for name in CALIBRATION_FIELDS],
+        capacity='%g' % capacity,
+        pulses_per_cell=configured_pulses_per_cell(),
+        auto_mode=bool(safe_get(constants.AUTO_MODE.value, False)),
+        notice=notice,
+        errors=errors or {})
+
+
+def send_command(command, **fields):
+    """Leaves a command for the daemon, which takes it on its next idle pass."""
+    memcache_client.set(helpers.command_key(constants), dict(fields, command=command))
+
+
+def select_profile(name):
+    """Makes a profile the live one and remembers it in the config file.
+
+    Returns a note about the file if it could not be written, else ''.
+    """
+    set_memcache_value(constants.ACTIVE_PROFILE.value, name)
+    try:
+        helpers.update_ini_section(args.config_file, 'profiles', {'active': name})
+    except OSError as exc:
+        return ' The selection will not survive a restart: %s could not be written (%s).' % (
+            args.config_file, exc)
+    return ''
+
+
+@app.route('/app/calibrate/')
+def calibrate_page():
+    """Calibrating the trickler for a powder: start, follow, review and apply."""
+    return render_calibrate(profile=request.args.get('profile'))
+
+
+@app.route('/app/calibrate/status')
+def calibrate_status():
+    """The routine's progress for the page to poll, plus the readings it shows beside it."""
+    status = calibration_status() or {}
+    weight = safe_get(constants.SCALE_WEIGHT.value)
+    return jsonify(
+        dict(status,
+             running=calibration_running(status),
+             scale_weight=None if weight is None else str(weight),
+             auto_mode=bool(safe_get(constants.AUTO_MODE.value, False))))
+
+
+@app.route('/app/calibrate/start', methods=['POST'])
+def calibrate_start():
+    """Asks the daemon to calibrate: the profile, the container's capacity, the cell size."""
+    name = (request.form.get('new_profile') or request.form.get('profile') or '').strip()
+    errors = {}
+    try:
+        capacity = float(request.form.get('capacity', ''))
+        if capacity < 20:
+            errors['capacity'] = 'Give the container capacity in grains; 20 is the least that makes sense.'
+    except ValueError:
+        errors['capacity'] = 'Give the container capacity in grains.'
+        capacity = None
+    try:
+        pulses_per_cell = int(request.form.get('pulses_per_cell', ''))
+        if not 3 <= pulses_per_cell <= 50:
+            errors['pulses_per_cell'] = 'Between 3 and 50 pulses per cell.'
+    except ValueError:
+        errors['pulses_per_cell'] = 'Give a whole number of pulses per cell.'
+        pulses_per_cell = None
+    if errors:
+        return render_calibrate(profile=name, errors=errors,
+                                notice='Not started. Check the values marked below.')
+    status = calibration_status()
+    if calibration_running(status):
+        return render_calibrate(profile=name, notice=(
+            'A calibration is already running. Wait for it to finish, or abort it.'))
+    if safe_get(constants.AUTO_MODE.value, False):
+        return render_calibrate(profile=name, notice=(
+            'Switch auto mode off first. Calibration runs the trickler on its own, and '
+            'must not race a charge.'))
+
+    notice = 'Calibration requested for %s.' % (name or 'the plain [trickler] settings')
+    notice += select_profile(name)
+    try:
+        helpers.update_ini_section(args.config_file, 'calibration', {'capacity': '%g' % capacity})
+        config.read(args.config_file)
+    except OSError as exc:
+        notice += ' The capacity could not be remembered: %s could not be written (%s).' % (
+            args.config_file, exc)
+    # A placeholder until the daemon's first report, so the page shows something is
+    # happening and a second Start is refused meanwhile.
+    memcache_client.set(helpers.calibration_status_key(constants), {
+        'phase': 'requested', 'progress': 0.0, 'prompt': None, 'finished': False,
+        'profile': name, 'results': None, 'error': None,
+        'message': 'Waiting for the trickler to pick the request up.'})
+    send_command('calibrate', profile=name, capacity=capacity, pulses_per_cell=pulses_per_cell)
+    logging.info('Requested a calibration: profile=%r capacity=%s pulses_per_cell=%s',
+                 name, capacity, pulses_per_cell)
+    return render_calibrate(profile=name, notice=notice)
+
+
+@app.route('/app/calibrate/continue', methods=['POST'])
+def calibrate_continue():
+    """The container has been emptied, or the pan put back."""
+    send_command('calibrate_continue')
+    return redirect(url_for('calibrate_page'))
+
+
+@app.route('/app/calibrate/abort', methods=['POST'])
+def calibrate_abort():
+    status = calibration_status()
+    if status and status.get('phase') == 'requested':
+        # The daemon has not picked it up; there is nothing to abort but the request.
+        memcache_client.delete(helpers.command_key(constants))
+        memcache_client.delete(helpers.calibration_status_key(constants))
+        return render_calibrate(notice='Request withdrawn.')
+    send_command('calibrate_abort')
+    return redirect(url_for('calibrate_page'))
+
+
+@app.route('/app/calibrate/dismiss', methods=['POST'])
+def calibrate_dismiss():
+    """Clears a finished routine's report. Its record in learned.json stays."""
+    memcache_client.delete(helpers.calibration_status_key(constants))
+    return render_calibrate(notice='Dismissed. The results are still in the record for the profile.')
+
+
+@app.route('/app/calibrate/apply', methods=['POST'])
+def calibrate_apply():
+    """Puts the recommended (or hand-edited) settings in force and saves them.
+
+    The same two writes as the tuning page -- live overrides for the next charge and the
+    config file for the one after a reboot -- except that, given a profile name, the file
+    write goes to that profile's section, since a calibration is a fact about one
+    powder. Then the daemon is told, so the profile's learned rates are seeded from the
+    calibration at the speeds now in force rather than probed again.
+    """
+    name = (request.form.get('save_profile') or '').strip()
+    current, _ = current_trickler_settings()
+    submitted = {key: request.form[key] for key in CALIBRATION_FIELDS if key in request.form}
+    values, errors = helpers.clean_trickler_settings(submitted, current)
+    set_memcache_value(constants.TRICKLER_SETTINGS.value, values)
+
+    section = helpers.profile_section(name) if name else 'trickler'
+    notice = 'Applied. The next charge uses these values'
+    try:
+        helpers.update_ini_section(args.config_file, section, values)
+        config.read(args.config_file)
+        notice += ', saved to [%s].' % section
+    except OSError as exc:
+        logging.warning('Could not write %s: %s', args.config_file, exc)
+        notice += ', but %s could not be written (%s), so they will be lost on restart.' % (
+            args.config_file, exc)
+    if name:
+        notice += select_profile(name)
+    send_command('calibrate_apply', profile=name,
+                 pulse_pwm=float(values['pulse_pwm']), pulse_fast_pwm=float(values['pulse_fast_pwm']))
+    if errors:
+        notice += ' Some values were adjusted: ' + ' '.join(errors.values())
+    return render_calibrate(profile=name, notice=notice, errors=errors)
+
+
 def render_config(errors=None, notice=None):
     """Renders the tuning page with whatever values are currently in force."""
     values, live = current_trickler_settings()

@@ -254,3 +254,83 @@ class ScreenConfigTest(unittest.TestCase):
         config = configparser.ConfigParser()
         config.read(CONFIG_PATH)
         self.assertEqual(screen.screen_config(config), (23, 24, FONT_PATH))
+
+
+@unittest.skipIf(SKIP, 'screen dependencies not available: %s' % SKIP)
+class CalibrationBandTest(ScreenTestCase):
+    """A band while the calibration routine runs, so the person at the bench sees the
+    pause for emptying the container without the browser open."""
+
+    AMBER = (255, 160, 0)
+
+    def setUp(self):
+        super().setUp()
+        self.app.colors['AMBER'] = self.AMBER
+
+    def status(self, phase='sweep', prompt=None, finished=False):
+        self.memcache.set('calibration_status', {
+            'phase': phase, 'prompt': prompt, 'finished': finished, 'progress': 0.4})
+
+    def top_band_colour(self):
+        self.app.update_display()
+        return self.display.frame.getpixel((2, 2))
+
+    def test_no_band_when_nothing_is_running(self):
+        self.assertFalse(self.app.refresh())
+        self.assertEqual(self.top_band_colour(), (0, 0, 0))
+
+    def test_an_amber_band_while_it_runs(self):
+        self.status()
+        self.assertTrue(self.app.refresh())
+        self.assertEqual(self.top_band_colour(), self.AMBER)
+
+    def test_red_when_it_is_waiting_for_the_container_to_be_emptied(self):
+        self.status(phase='paused', prompt='empty_container')
+        self.app.refresh()
+        self.assertEqual(self.top_band_colour(), (255, 0, 0))
+        self.assertEqual(self.app.band()[1], ('EMPTY', 'CUP'))
+
+    def test_red_when_the_pan_is_missing(self):
+        self.status(phase='paused', prompt='pan_missing')
+        self.app.refresh()
+        self.assertEqual(self.app.band()[1], ('PAN', 'MISSING'))
+
+    def test_the_band_goes_when_the_routine_finishes(self):
+        self.status()
+        self.app.refresh()
+        self.status(phase='done', finished=True)
+        self.assertTrue(self.app.refresh())
+        self.assertEqual(self.top_band_colour(), (0, 0, 0))
+
+    def test_a_status_the_screen_cannot_read_is_ignored(self):
+        self.memcache.set('calibration_status', 'not a dict')
+        self.assertFalse(self.app.refresh())
+        self.assertEqual(self.top_band_colour(), (0, 0, 0))
+
+    def test_the_jam_band_wins(self):
+        self.status()
+        self.set(self.keys.DUMP_ERROR, 'jammed')
+        self.app.refresh()
+        self.assertEqual(self.top_band_colour(), (255, 0, 0))
+        self.assertEqual(self.app.band()[1], ('MEASURE', 'JAMMED'))
+
+    def test_every_word_fits_the_panel(self):
+        """CALIBRATING is 149px at 20pt on a 135px panel; it has its own font size."""
+        from PIL import Image, ImageDraw
+        draw = ImageDraw.Draw(Image.new('RGB', (self.display.width, self.display.height)))
+        for status in ({'phase': 'sweep', 'finished': False},
+                       {'phase': 'paused', 'finished': False, 'prompt': 'empty_container'},
+                       {'phase': 'paused', 'finished': False, 'prompt': 'pan_missing'}):
+            _, lines = self.app.band_for_calibration(status)
+            font = self.app.alert_font if len(lines) > 1 else self.app.band_font
+            for line in lines:
+                box = draw.textbbox((0, 0), line, font=font)
+                self.assertLess(box[2] - box[0], self.display.width - 8, line)
+
+    def test_the_band_does_not_cover_the_target_weight(self):
+        self.status()
+        self.app.refresh()
+        self.app.update_display()
+        frame = self.display.frame
+        row = [frame.getpixel((x, 58)) for x in range(frame.width)]
+        self.assertNotIn(self.AMBER, row)

@@ -348,8 +348,28 @@ class FeedModel:
             'updated': datetime.datetime.now().isoformat(timespec='seconds'),
         })
 
+    def seed(self, rate, fast_rate=None):
+        """Takes rates measured elsewhere -- by the calibration routine -- as measured.
+
+        The routine stores its fitted rates for every speed it swept; when its
+        recommendation is applied, the two speeds the charges will actually run at are
+        seeded here so the first pulse of the next charge is aimed rather than a probe.
+        A fast rate of None leaves the fast speed to be probed, as after a reset.
+        """
+        self.rate = max(float(rate), MIN_PULSE_RATE)
+        self.measured = True
+        self.fast_rate = None if fast_rate is None else max(float(fast_rate), MIN_PULSE_RATE)
+        if self._keys and self.fast_rate is None:
+            self._memcache.delete(self._keys[True])
+        self.save()
+
     def reset(self, settings):
-        """Forgets everything learned for this profile, in memory and in both stores."""
+        """Forgets the rates learned for this profile, in memory and in both stores.
+
+        The profile's calibration record, if it has one, is kept: it is a measurement of
+        the powder, not a rate the next charge will trust, and the page shows it as the
+        last calibration until a new one replaces it.
+        """
         self.measured = False
         self.fast_rate = None
         self.rate = float(settings.pulse_rate)
@@ -359,17 +379,29 @@ class FeedModel:
                 self._memcache.delete(key)
         self._write(None)
 
+    # The keys this model owns in its learned.json entry. Everything else in the entry
+    # belongs to someone else -- the calibration routine keeps its results there -- and
+    # is left alone, which is why a save merges rather than replaces.
+    OWN_KEYS = ('rate', 'fast_rate', 'updated')
+
     def _write(self, entry):
         if not self.path:
             return
         try:
             data = helpers.read_json(self.path)
+            current = data.get(self.profile)
+            if not isinstance(current, dict):
+                current = {}
+            kept = {k: v for k, v in current.items() if k not in self.OWN_KEYS}
             if entry is None:
                 if self.profile not in data:
                     return
-                del data[self.profile]
+                if kept:
+                    data[self.profile] = kept
+                else:
+                    del data[self.profile]
             else:
-                data[self.profile] = entry
+                data[self.profile] = dict(kept, **entry)
             helpers.write_json(self.path, data)
         except OSError:
             logging.warning('Could not write the learned feed rates to %s', self.path,
@@ -1183,7 +1215,8 @@ def handle_command(config, memcache, constants, hw, models):
     The command is taken before it is acted on, so one that fails is not retried every
     pass. `reset_learned` forgets a profile's rates; `calibrate` starts the calibration
     routine, which then runs a step at a time from run_pass(); `calibrate_continue` and
-    `calibrate_abort` steer it.
+    `calibrate_abort` steer it; `calibrate_apply` seeds the rates once its recommendation
+    has been applied from the page.
     """
     key = helpers.command_key(constants)
     command = memcache.get(key)
@@ -1213,8 +1246,51 @@ def handle_command(config, memcache, constants, hw, models):
     elif name == 'calibrate_abort':
         if models.calibration is not None:
             models.calibration.abort('Aborted from the page.')
+    elif name == 'calibrate_apply':
+        apply_calibration(config, memcache, constants, hw, models, command)
     else:
         logging.warning('Ignoring a command the trickler does not know: %r', command)
+
+
+def apply_calibration(config, memcache, constants, hw, models, command):
+    """Seeds a profile's feed model from its stored calibration, at the speeds applied.
+
+    The page has already written the recommended settings; what it cannot do is tell
+    this process's FeedModel that the rates at the new pulse speeds are measured, since
+    the model is in memory here and the file is only read at startup. The routine stored
+    a fitted rate for every speed it swept, so the two the charges will run at are
+    looked up and taken as measured. A speed the sweep did not visit leaves that rate as
+    it was, and says so.
+    """
+    target_unit = memcache.get(constants.TARGET_UNIT.value)
+    settings = trickler_settings(config, memcache, constants, hw.scale, target_unit)
+    profile = command.get('profile', settings.profile)
+    settings = settings._replace(profile=profile)
+    if not settings.learned_path:
+        logging.warning('Cannot apply a calibration: history is switched off.')
+        return
+    stored = helpers.read_json(settings.learned_path).get(profile, {})
+    rates = stored.get('calibration', {}).get('rates', {}) if isinstance(stored, dict) else {}
+
+    def rate_at(speed):
+        if speed is None:
+            return None
+        key = str(float(speed))
+        value = rates.get(key, rates.get(str(int(float(speed)))))
+        return None if value is None else float(value)
+
+    fine_speed = command.get('pulse_pwm', settings.pulse_pwm)
+    fast_speed = command.get('pulse_fast_pwm', settings.pulse_fast_pwm)
+    fine = rate_at(fine_speed)
+    fast = rate_at(fast_speed) if float(fast_speed) > float(fine_speed) else None
+    if fine is None:
+        logging.warning('No calibrated rate at %s%% for %s; the next charge probes it.',
+                        fine_speed, profile or 'the plain [trickler] settings')
+        return
+    models.for_settings(settings).seed(fine, fast)
+    logging.info('Applied the calibration for %s: %.4f/s at %s%%%s.',
+                 profile or 'the plain [trickler] settings', fine, fine_speed,
+                 '' if fast is None else ', %.4f/s at %s%%' % (fast, fast_speed))
 
 
 def run_pass(config, memcache, constants, hw, models, last_status=None):

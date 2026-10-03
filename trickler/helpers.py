@@ -451,6 +451,19 @@ def write_json(path, data):
 DEFAULT_COMMAND_KEY = 'trickler_command'
 
 
+DEFAULT_CALIBRATION_STATUS_KEY = 'calibration_status'
+
+
+def calibration_status_key(constants):
+    """The memcache key the calibration routine reports under, defaulted like command_key().
+
+    Read by the daemon that writes it, the web page that shows it and the screen that
+    puts a band up while it runs, so the fallback lives here rather than in any of them.
+    """
+    member = getattr(constants, 'CALIBRATION_STATUS', None)
+    return member.value if member is not None else DEFAULT_CALIBRATION_STATUS_KEY
+
+
 def command_key(constants):
     """The memcache key commands travel under.
 
