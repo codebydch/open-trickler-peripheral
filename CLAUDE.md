@@ -96,7 +96,11 @@ defaults, so they keep testing the same thing when a default moves.
   config file's value never applied. And the config value has to be read with
   `getboolean`: `config['general']['verbose']` is the *string* `'False'`, which is true, so
   every daemon ran at DEBUG whatever the ini said and journald rotated the charge lines out
-  within minutes. `helpers.log_level` is the one place the level is decided now.
+  within minutes. `helpers.log_level` is the one place the level is decided now. The same
+  `DEFAULTS[x] or config[...]` shape made `screen.py` ignore `[buttons]` and `[screen]`
+  entirely (hidden because the shipped ini equals the defaults), and `scales.py`'s bench
+  tool ignore the scale model. Never write `default or config[...]`; read the config and
+  pass the default as `fallback=`.
 - `done()` must not use `min_dose` until a rate has been measured -- a high seed rate
   made it declare charges complete before firing anything.
 - Stopping a grain light (`cutoff_weight = 0.02`) left the pan reading under target, and

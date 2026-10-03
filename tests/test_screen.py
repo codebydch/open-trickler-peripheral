@@ -223,3 +223,34 @@ class DigitEditorTest(ScreenTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipIf(SKIP, 'screen dependencies not available: %s' % SKIP)
+class ScreenConfigTest(unittest.TestCase):
+    """The pins and font come from the ini. They used to come from hard-coded defaults
+    that happened to match the shipped ini, so an edited ini was silently ignored."""
+
+    @staticmethod
+    def config(**sections):
+        config = configparser.ConfigParser()
+        for name, values in sections.items():
+            config.add_section(name)
+            for key, value in values.items():
+                config[name][key] = value
+        return config
+
+    def test_the_ini_is_read(self):
+        settings = screen.screen_config(self.config(
+            buttons={'button1_gpio': '5', 'button2_gpio': '6'},
+            screen={'font_path': '/fonts/other.ttf'}))
+        self.assertEqual(settings, (5, 6, '/fonts/other.ttf'))
+
+    def test_missing_sections_fall_back_to_the_mini_pitft_wiring(self):
+        settings = screen.screen_config(self.config())
+        self.assertEqual(settings, (23, 24, FONT_PATH))
+
+    def test_the_shipped_config_matches_the_defaults(self):
+        """Which is why nobody noticed the file was never read."""
+        config = configparser.ConfigParser()
+        config.read(CONFIG_PATH)
+        self.assertEqual(screen.screen_config(config), (23, 24, FONT_PATH))

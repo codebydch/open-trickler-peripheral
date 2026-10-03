@@ -513,16 +513,6 @@ SCALES = {
 # Handle command-line execution.
 if __name__ == '__main__':
     import argparse
-    import configparser
-
-
-    # Default argument values.
-    DEFAULTS = dict(
-        scale = 'and-fx120',
-        scale_port = '/dev/ttyUSB0',
-        scale_baudrate = 19200,
-        scale_timeout = 0.1,
-    )
 
     parser = argparse.ArgumentParser(description='Test scale.')
     parser.add_argument('config_file')
@@ -542,15 +532,12 @@ if __name__ == '__main__':
     # --verbose on the command line wins, else the config file decides.
     helpers.setup_logging(helpers.log_level(config, args.verbose))
 
-    # Order of priority is 1) command-line argument, 2) config file, 3) default.
+    # The command line wins over the config file. Port, baud rate and timeout are read
+    # from the file by the scale class itself unless given here. The model used to be
+    # `DEFAULTS['scale'] or config['scale']['model']`, which always came out as the
+    # default, so this tool tested an A&D scale whatever the ini said.
     kwargs = {}
-    SCALE_MODEL = DEFAULTS['scale'] or config['scale']['model']
-    SCALE_PORT = DEFAULTS['scale_port'] or config['scale']['port']
-    SCALE_BAUDRATE = DEFAULTS['scale_baudrate'] or config['scale']['baudrate']
-    SCALE_TIMEOUT = DEFAULTS['scale_timeout'] or config['scale']['timeout']
-    if args.scale is not None:
-        SCALE_MODEL = args.scale
-        kwargs['scale_model'] = args.scale
+    SCALE_MODEL = args.scale or config['scale']['model']
     if args.scale_port is not None:
         kwargs['port'] = args.scale_port
     if args.scale_baudrate is not None:
