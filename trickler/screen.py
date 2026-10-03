@@ -5,6 +5,7 @@ Released under the MIT license. See LICENSE file in the project root for details
 
 https://github.com/codebydch/open-trickler-peripheral
 """
+import collections
 import time
 import digitalio
 import board
@@ -22,6 +23,30 @@ from decimal import Decimal
 
 # How often to check memcache for changes made elsewhere, in seconds.
 REFRESH_INTERVAL = 0.25
+
+# Used when the config file predates the [buttons] and [screen] sections. The Mini PiTFT
+# wires its buttons to GPIO 23 and 24, and Raspberry Pi OS ships DejaVu.
+DEFAULT_BUTTON1_GPIO = 23
+DEFAULT_BUTTON2_GPIO = 24
+DEFAULT_FONT_PATH = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+
+ScreenConfig = collections.namedtuple(
+    'ScreenConfig', ('button1_gpio', 'button2_gpio', 'font_path'))
+
+
+def screen_config(config):
+    """The button pins and font from the config file, with the Mini PiTFT defaults.
+
+    This used to be `DEFAULTS['button1_gpio'] or config['buttons']['button1_gpio']`, and
+    23 is true, so the file was never consulted: the screen ran on GPIO 23 and 24 and the
+    DejaVu font whatever [buttons] and [screen] said. Nobody noticed because the shipped
+    config says the same thing. Rewire the buttons and edit the ini, and the edit was
+    silently ignored.
+    """
+    return ScreenConfig(
+        config.getint('buttons', 'button1_gpio', fallback=DEFAULT_BUTTON1_GPIO),
+        config.getint('buttons', 'button2_gpio', fallback=DEFAULT_BUTTON2_GPIO),
+        config.get('screen', 'font_path', fallback=DEFAULT_FONT_PATH))
 
 
 class MiniPiTFTApp:
@@ -212,14 +237,6 @@ if __name__ == "__main__":
     import argparse
     import configparser
 
-    # Default argument values.
-    DEFAULTS = dict(
-        verbose = False,
-        button1_gpio = 23,
-        button2_gpio = 24,
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    )
-
     parser = argparse.ArgumentParser(description='Run OpenTrickler Screen.')
     parser.add_argument('--target_weight', type=Decimal, default=0.0)
     parser.add_argument('config_file')
@@ -232,22 +249,12 @@ if __name__ == "__main__":
     
     config = helpers.load_config(args.config_file)
 
-    # Order of priority is 1) command-line argument, 2) config file, 3) default.
-    VERBOSE = DEFAULTS['verbose'] or config['general']['verbose']
-    if args.verbose is not None:
-        VERBOSE = args.verbose
-
-    # Configure Python logging.
-    LOG_LEVEL = logging.INFO
-    if VERBOSE:
-        LOG_LEVEL = logging.DEBUG
-    helpers.setup_logging(LOG_LEVEL)  
+    # --verbose on the command line wins, else the config file decides.
+    helpers.setup_logging(helpers.log_level(config, args.verbose))
     
     logging.info('Starting OpenTrickler Screen daemon...')
     logging.info('Setting up Screen...')
-    button1_gpio = DEFAULTS['button1_gpio'] or config['buttons']['button1_gpio']
-    button2_gpio = DEFAULTS['button2_gpio'] or config['buttons']['button2_gpio']
-    
+    button1_gpio, button2_gpio, font_path = screen_config(config)
     logging.info('Button1 GPIO pin is set as %s', button1_gpio)
     logging.info('Button2 GPIO pin is set as %s', button2_gpio)
     target_weight = Decimal('0.0')
@@ -299,8 +306,6 @@ if __name__ == "__main__":
         'RED': (255, 0, 0),
         'GREEN': (0, 255, 0)
     }
-    
-    font_path = DEFAULTS['font_path'] or config['screen']['font_path']
     
     logging.info('Screen is setup.')
     
