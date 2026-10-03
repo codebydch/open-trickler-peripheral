@@ -10,7 +10,6 @@ OpenTrickler forked and updated here:
 https://github.com/codebydch/open-trickler-peripheral
 """
 import collections
-import configparser
 import datetime
 import decimal
 import enum
@@ -31,11 +30,6 @@ import scales
 # 4. API
 # 6. Bluetooth?
 # 7: Powder pan/cup?
-
-
-# A stand-in for a config section that isn't in the file, so the typed getters below can
-# be used without checking has_section() first.
-EMPTY_SECTION = configparser.ConfigParser()['DEFAULT']
 
 
 # Grains per gram, used to convert the grain-based trickler thresholds in the
@@ -115,6 +109,7 @@ TricklerSettings = collections.namedtuple('TricklerSettings', (
     'history_max_rows',
     'pulses_path',
     'pulses_max_rows',
+    'learned_path',
 ))
 
 
@@ -167,6 +162,210 @@ def settled_weight(scale, timeout, min_wait=0.0):
     return scale.weight
 
 
+class FeedModel:
+    """What has been learned about feeding one powder, kept across charges.
+
+    PulseFeeder is built per charge and fires the pulses; this holds what those pulses
+    taught -- the feed rate at each pulse speed, whether it was measured or is still the
+    configured guess, and the window of recent pulses the rate is measured over -- and
+    lives for the life of the daemon, one per powder profile. It is saved two ways: to
+    learned.json beside the charge history, which survives a reboot, and to memcache,
+    which the tuning page reads. Before this the rate lived in memcache alone, so every
+    reboot forgot every powder and the first pulse of the next charge was a probe again.
+
+    The window is still emptied at the start of every charge, in new_charge(). Keeping
+    it would stop one burst on a short first pulse swinging the stored rate, and it is a
+    one-line change here -- but it changes how charges behave, so it waits for bench
+    evidence (see CLAUDE.md, Phase 2).
+    """
+
+    def __init__(self, settings, memcache=None, constants=None):
+        """Constructor. Loads whatever a previous charge learned for this profile."""
+        self.profile = settings.profile
+        self.path = settings.learned_path
+        self._memcache = memcache
+        self._keys = None
+        if memcache is not None and constants is not None:
+            # Scoped to the profile, so switching powder switches the estimate instead of
+            # blending two powders into an average that fits neither.
+            self._keys = {False: learned_rate_key(constants, settings.profile),
+                          True: learned_rate_key(constants, settings.profile, fast=True)}
+        # Grains (or grams) delivered per second of motor on-time, at each of the two
+        # pulse speeds. Both are measured rather than assumed: a vibratory feeder's
+        # throughput against drive is not reliably linear, and the whole point of
+        # learning the slow rate applies just as much to the fast one.
+        self.rate = float(settings.pulse_rate)
+        # The configured pulse_rate is a starting guess, not a measurement. Until a pulse
+        # has actually been weighed at a speed, pulses there are probes rather than aimed
+        # doses -- see PulseFeeder._probe_time().
+        self.measured = False
+        self.fast_rate = None
+        # Recent pulses at each speed, as (moving_time, dose). The rate is measured over
+        # the whole window rather than pulse by pulse: powder arrives as whole grains, so
+        # an individual dose is 0, one grain, or three, and none of those is the feed
+        # rate. Summing the window lets the zeros and the clumps cancel, which is the
+        # only unbiased way to measure a granular process.
+        self.window = {False: collections.deque(maxlen=PULSE_RATE_WINDOW),
+                       True: collections.deque(maxlen=PULSE_RATE_WINDOW)}
+        # How far the guessed rate is discounted when sizing a probe. Doubles every time
+        # a probe delivers too little to measure, because that is evidence the guess is
+        # too high -- and a probe sized from a rate several times too high is far too
+        # short to ever deliver anything.
+        self.probe_scale = {False: 1.0, True: 1.0}
+        self.load()
+
+    def is_measured(self, fast):
+        """Whether a pulse has ever been weighed at this speed."""
+        return self.fast_rate is not None if fast else self.measured
+
+    def new_charge(self, settings):
+        """Starts a charge: a fresh window and probe scale.
+
+        A rate nothing has measured is re-read from the settings, since the tuning page
+        may have changed the starting guess; a measured one is kept.
+        """
+        for window in self.window.values():
+            window.clear()
+        self.probe_scale = {False: 1.0, True: 1.0}
+        if not self.measured:
+            self.rate = float(settings.pulse_rate)
+
+    def learn(self, moving, dose, fast, resolution):
+        """Folds one weighed pulse into the rate for the speed it used.
+
+        Returns what the window has delivered in total, so the caller can judge whether
+        the pulses are still productive.
+
+        Measured over a window of recent pulses rather than one at a time. Powder lands as
+        whole grains, so a single dose is 0, one grain, or occasionally three -- none of
+        which is the feed rate. Worse, judging each pulse alone and discarding the ones
+        that read zero keeps only the hits and throws away the misses, which overestimated
+        the rate by three times on the bench and made every pulse sized from it too long.
+        Summing weight and time across the window lets the zeros and the clumps cancel.
+        """
+        window = self.window[bool(fast)]
+        if moving > 0:
+            window.append((moving, dose))
+
+        delivered = sum(pulse_dose for _, pulse_dose in window)
+        elapsed = sum(pulse_time for pulse_time, _ in window)
+        if delivered < resolution or elapsed <= 0:
+            logging.debug('Window has delivered %r over %rs, less than the scale can '
+                          'resolve; not learning from it yet.', delivered, elapsed)
+            if not self.is_measured(fast):
+                # The probe was too short to read, so the rate it was sized from is too
+                # high. Distrust it further and probe for longer, rather than firing the
+                # same fruitless pulse over and over.
+                self.probe_scale[bool(fast)] = min(
+                    self.probe_scale[bool(fast)] * 2, MAX_FAST_PROBE)
+            return delivered
+
+        observed = delivered / elapsed
+        # Each speed has its own estimate. Folding a fast pulse into the fine rate would
+        # make the pulses that finish the charge far too long.
+        if not self.is_measured(fast):
+            # The first real measurement at a speed replaces its guess outright. Easing
+            # towards it from a guess that could be several times out would leave the
+            # next pulse sized on a number nothing has ever measured.
+            updated = max(observed, MIN_PULSE_RATE)
+            self.probe_scale[bool(fast)] = 1.0
+        else:
+            current = self.fast_rate if fast else self.rate
+            updated = max(current + (observed - current) * PULSE_RATE_LEARN, MIN_PULSE_RATE)
+        if fast:
+            self.fast_rate = updated
+        else:
+            self.rate = updated
+            self.measured = True
+        self.save()
+        return delivered
+
+    def load(self):
+        """Takes the stored rates: memcache first, since it is live, else the file.
+
+        When only the file has a rate -- memcached restarted, usually with the Pi -- it
+        is put back into memcache too, so the tuning page shows it.
+        """
+        stored = helpers.read_json(self.path).get(self.profile, {}) if self.path else {}
+        if not isinstance(stored, dict):
+            stored = {}
+        for fast in (False, True):
+            live = self._memcache.get(self._keys[fast]) if self._keys else None
+            value = live or stored.get('fast_rate' if fast else 'rate')
+            if not value:
+                continue
+            value = max(float(value), MIN_PULSE_RATE)
+            if fast:
+                self.fast_rate = value
+            else:
+                self.rate = value
+                self.measured = True
+            if self._keys and not live:
+                self._memcache.set(self._keys[fast], value)
+
+    def save(self):
+        """Writes the measured rates to both stores. A file that can't be written is
+        logged and dropped: a trickler that stops over it is not acceptable."""
+        if self._keys:
+            if self.measured:
+                self._memcache.set(self._keys[False], self.rate)
+            if self.fast_rate is not None:
+                self._memcache.set(self._keys[True], self.fast_rate)
+        self._write({
+            'rate': self.rate if self.measured else None,
+            'fast_rate': self.fast_rate,
+            'updated': datetime.datetime.now().isoformat(timespec='seconds'),
+        })
+
+    def reset(self, settings):
+        """Forgets everything learned for this profile, in memory and in both stores."""
+        self.measured = False
+        self.fast_rate = None
+        self.rate = float(settings.pulse_rate)
+        self.new_charge(settings)
+        if self._keys:
+            for key in self._keys.values():
+                self._memcache.delete(key)
+        self._write(None)
+
+    def _write(self, entry):
+        if not self.path:
+            return
+        try:
+            data = helpers.read_json(self.path)
+            if entry is None:
+                if self.profile not in data:
+                    return
+                del data[self.profile]
+            else:
+                data[self.profile] = entry
+            helpers.write_json(self.path, data)
+        except OSError:
+            logging.warning('Could not write the learned feed rates to %s', self.path,
+                            exc_info=True)
+
+
+class FeedModels:
+    """One FeedModel per powder profile, for the life of the daemon."""
+
+    def __init__(self, memcache=None, constants=None):
+        self._memcache = memcache
+        self._constants = constants
+        self._models = {}
+
+    def for_settings(self, settings):
+        """The model for the profile these settings name, built on first use."""
+        model = self._models.get(settings.profile)
+        if model is None:
+            model = FeedModel(settings, self._memcache, self._constants)
+            self._models[settings.profile] = model
+        return model
+
+    def reset(self, settings):
+        """Forgets what was learned for the profile these settings name."""
+        self.for_settings(settings).reset(settings)
+
+
 class PulseFeeder:
     """Feeds powder in short pulses and learns how much each one delivers.
 
@@ -178,56 +377,63 @@ class PulseFeeder:
     result corrects the estimate used to size the next one.
     """
 
-    def __init__(self, motor, scale, settings, memcache=None, constants=None):
-        """Constructor. Seeds the feed rate from memcache if a previous charge learned one."""
+    def __init__(self, motor, scale, settings, memcache=None, constants=None, model=None):
+        """Constructor.
+
+        `model` is the FeedModel for this powder, kept by the daemon across charges. Left
+        out, a transient one is built from `memcache` and `constants` -- what the tests
+        and the older call sites do. It loads and saves exactly what the long-lived one
+        would; it just does not outlive the charge.
+        """
         self._motor = motor
         self._scale = scale
         self._settings = settings
-        self._memcache = memcache
-        self._constants = constants
-        # Grains (or grams) delivered per second of motor on-time, at each of the two
-        # pulse speeds. Both are measured rather than assumed: a vibratory feeder's
-        # throughput against drive is not reliably linear, and the whole point of
-        # learning the slow rate applies just as much to the fast one.
-        self._rate = float(settings.pulse_rate)
-        # The configured pulse_rate is a starting guess, not a measurement. Until a pulse
-        # has actually been weighed at a speed, pulses there are probes rather than aimed
-        # doses -- see _probe_time().
-        self._rate_measured = False
-        self._fast_rate = None
-        self._rate_key = None
-        self._fast_rate_key = None
-        if memcache is not None and constants is not None:
-            # Scoped to the profile, so switching powder switches the estimate instead of
-            # blending two powders into an average that fits neither.
-            self._rate_key = learned_rate_key(constants, settings.profile)
-            learned = memcache.get(self._rate_key)
-            if learned:
-                self._rate = max(float(learned), MIN_PULSE_RATE)
-                self._rate_measured = True
-            self._fast_rate_key = learned_rate_key(
-                constants, settings.profile, fast=True)
-            learned_fast = memcache.get(self._fast_rate_key)
-            if learned_fast:
-                self._fast_rate = max(float(learned_fast), MIN_PULSE_RATE)
+        if model is None:
+            model = FeedModel(settings, memcache=memcache, constants=constants)
+        else:
+            model.new_charge(settings)
+        self._model = model
         self.empty_pulses = 0
         self.pulses = 0
         # One dict per pulse fired, written to the pulse file when the charge ends. This
         # is the record the feed rate and spin-up are fitted from; the log line in
         # pulse_phase is for watching, this is for measuring.
         self.records = []
-        # How far the guessed rate is discounted when sizing a probe. Doubles every time
-        # a probe delivers too little to measure, because that is evidence the guess is
-        # too high -- and a probe sized from a rate several times too high is far too
-        # short to ever deliver anything.
-        self._probe_scale = {False: 1.0, True: 1.0}
-        # Recent pulses at each speed, as (on_time, dose). The rate is measured over the
-        # whole window rather than pulse by pulse: powder arrives as whole grains, so an
-        # individual dose is 0, one grain, or three, and none of those is the feed rate.
-        # Summing the window lets the zeros and the clumps cancel, which is the only
-        # unbiased way to measure a granular process.
-        self._window = {False: collections.deque(maxlen=PULSE_RATE_WINDOW),
-                        True: collections.deque(maxlen=PULSE_RATE_WINDOW)}
+
+    # The learned numbers live on the FeedModel. These read and write through to it, so
+    # the arithmetic below reads as it did and tests can pin a rate directly.
+    @property
+    def _rate(self):
+        return self._model.rate
+
+    @_rate.setter
+    def _rate(self, value):
+        self._model.rate = value
+
+    @property
+    def _rate_measured(self):
+        return self._model.measured
+
+    @_rate_measured.setter
+    def _rate_measured(self, value):
+        self._model.measured = value
+
+    @property
+    def _fast_rate(self):
+        return self._model.fast_rate
+
+    @_fast_rate.setter
+    def _fast_rate(self, value):
+        self._model.fast_rate = value
+
+    @property
+    def _probe_scale(self):
+        return self._model.probe_scale
+
+    @property
+    def model(self):
+        """The FeedModel this feeder learns into."""
+        return self._model
 
     @property
     def settings(self):
@@ -371,7 +577,7 @@ class PulseFeeder:
 
     def _measured(self, fast):
         """Whether a pulse has ever been weighed at this speed."""
-        return self._fast_rate is not None if fast else self._rate_measured
+        return self._model.is_measured(fast)
 
     def _probe_time(self, remainder, fast):
         """How long the first pulse at a speed should run, before anything has been
@@ -434,15 +640,7 @@ class PulseFeeder:
         return min(max(pwm, self._settings.stall_pwm), 100.0) / 100
 
     def _learn(self, on_time, dose, fast=False):
-        """Folds one measured pulse into the feed-rate estimate for the speed it used.
-
-        Measured over a window of recent pulses rather than one at a time. Powder lands as
-        whole grains, so a single dose is 0, one grain, or occasionally three -- none of
-        which is the feed rate. Worse, judging each pulse alone and discarding the ones
-        that read zero keeps only the hits and throws away the misses, which overestimated
-        the rate by three times on the bench and made every pulse sized from it too long.
-        Summing weight and time across the window lets the zeros and the clumps cancel.
-        """
+        """Hands one weighed pulse to the FeedModel, and keeps count of fruitless ones."""
         if dose < 0:
             # Pan knocked, or the scale drifted down. Nothing to learn, but it still
             # counts as a pulse that got us no closer -- otherwise a run of them loops
@@ -451,51 +649,13 @@ class PulseFeeder:
             self.empty_pulses += 1
             return
 
-        moving = self._moving_time(on_time)
-        window = self._window[bool(fast)]
-        if moving > 0:
-            window.append((moving, float(dose)))
-
-        delivered = sum(pulse_dose for _, pulse_dose in window)
-        elapsed = sum(pulse_time for pulse_time, _ in window)
+        delivered = self._model.learn(
+            self._moving_time(on_time), float(dose), fast, float(self.resolution))
         # A pulse only counts as unproductive if the whole window has delivered nothing.
         # A few grainless pulses in a row is ordinary -- powder teeters on the lip and
         # falls on a later pulse -- and treating each one as evidence of an empty hopper
         # abandoned three charges in four on the bench, seconds before they finished.
         self.empty_pulses = 0 if delivered > 0 else self.empty_pulses + 1
-
-        if delivered < float(self.resolution) or elapsed <= 0:
-            logging.debug('Window has delivered %r over %rs, less than the scale can '
-                          'resolve; not learning from it yet.', delivered, elapsed)
-            if not self._measured(fast):
-                # The probe was too short to read, so the rate it was sized from is too
-                # high. Distrust it further and probe for longer, rather than firing the
-                # same fruitless pulse over and over.
-                self._probe_scale[bool(fast)] = min(
-                    self._probe_scale[bool(fast)] * 2, MAX_FAST_PROBE)
-            return
-
-        observed = delivered / elapsed
-        # Each speed has its own estimate. Folding a fast pulse into the fine rate would
-        # make the pulses that finish the charge far too long.
-        if not self._measured(fast):
-            # The first real measurement at a speed replaces its guess outright. Easing
-            # towards it from a guess that could be several times out would leave the
-            # next pulse sized on a number nothing has ever measured.
-            updated = max(observed, MIN_PULSE_RATE)
-            self._probe_scale[bool(fast)] = 1.0
-        else:
-            current = self.fast_rate if fast else self._rate
-            updated = max(current + (observed - current) * PULSE_RATE_LEARN, MIN_PULSE_RATE)
-        if fast:
-            self._fast_rate = updated
-            key = self._fast_rate_key
-        else:
-            self._rate = updated
-            self._rate_measured = True
-            key = self._rate_key
-        if self._memcache is not None and key is not None:
-            self._memcache.set(key, updated)
 
 
 def learned_rate_key(constants, profile, fast=False):
@@ -629,7 +789,8 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
         history_path=history.charges,
         history_max_rows=history.max_rows,
         pulses_path=history.pulses,
-        pulses_max_rows=history.pulses_max_rows)
+        pulses_max_rows=history.pulses_max_rows,
+        learned_path=history.learned)
 
 
 def dump_powder(servo_motor, scale, settings):
@@ -768,12 +929,18 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
             remainder, target_unit, weight, scale.unit, on_time, dose, feeder.rate)
 
 
-def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger):
-    """Main trickler control loop run when all devices are ready, target weight is set, and auto-mode is on."""
-    settings = trickler_settings(config, memcache, constants, scale, target_unit)
+def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale,
+                  target_weight, target_unit, pidtune_logger, settings=None, model=None):
+    """Main trickler control loop run when all devices are ready, target weight is set, and auto-mode is on.
+
+    `settings` and `model` come from the pass that decided to charge; left out, both are
+    built here, which is what the tests do.
+    """
+    if settings is None:
+        settings = trickler_settings(config, memcache, constants, scale, target_unit)
     logging.debug('trickler settings: %r', settings)
     feed_rate = FeedRateEstimator(settings.rate_window)
-    feeder = PulseFeeder(trickler_motor1, scale, settings, memcache, constants)
+    feeder = PulseFeeder(trickler_motor1, scale, settings, memcache, constants, model=model)
     stale_since = None
     started = time.time()
     outcome = None
@@ -902,18 +1069,26 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
     logging.info('Trickling process stopped.')
 
 
-def main(config, memcache, args, pidtune_logger):
-    """Main trickler function. This runs everything."""
-    constants = enum.Enum('memcache_vars', config['memcache_vars'])
+# Everything the daemon drives, built once at startup. A charge borrows all of it; a
+# Phase 2 calibration routine will borrow the motors and the scale.
+Hardware = collections.namedtuple('Hardware', (
+    'pid',
+    'trickler_motor1',
+    'trickler_motor2',
+    'servo_motor',
+    'scale',
+    'pidtune_logger',
+))
 
-    # Set up the PID controller.
+
+def build_hardware(config, memcache, pidtune_logger):
+    """Sets up the PID, both tricklers, the servo and the scale, waiting for the scale."""
     pid = PID.PID(
         float(config['PID']['Kp']),
         float(config['PID']['Ki']),
         float(config['PID']['Kd']))
     logging.debug('pid: %r', pid)
 
-    # Set up the trickler motor controller.
     trickler_motor1 = motors.TricklerMotor(1, config, memcache=memcache)
     logging.debug('trickler_motor1: %r', trickler_motor1)
     trickler_motor2 = motors.TricklerMotor(2, config, memcache=memcache)
@@ -921,7 +1096,6 @@ def main(config, memcache, args, pidtune_logger):
     servo_motor = motors.ServoMotor(config, memcache=memcache)
     logging.debug('servo_motor: %r', servo_motor)
 
-    # Set up the scale controller.
     scale_cls = scales.SCALES[config['scale']['model']]
     # Wait until the scale is ready.
     while 1:
@@ -934,6 +1108,113 @@ def main(config, memcache, args, pidtune_logger):
             logging.debug('scale: %r', scale)
             break
 
+    return Hardware(pid, trickler_motor1, trickler_motor2, servo_motor, scale, pidtune_logger)
+
+
+def handle_command(config, memcache, constants, scale, models):
+    """Carries out a command the web app left in memcache, if there is one.
+
+    The command is taken before it is acted on, so one that fails is not retried every
+    pass. Today there is one command; Phase 2's calibration routine is the next.
+    """
+    key = helpers.command_key(constants)
+    command = memcache.get(key)
+    if not command:
+        return
+    memcache.delete(key)
+    if not isinstance(command, dict):
+        command = {'command': command}
+    name = command.get('command')
+    if name == 'reset_learned':
+        target_unit = memcache.get(constants.TARGET_UNIT.value)
+        settings = trickler_settings(config, memcache, constants, scale, target_unit)
+        profile = command.get('profile', settings.profile)
+        models.reset(settings._replace(profile=profile))
+        logging.info('Forgot the learned feed rates for %s.',
+                     profile or 'the plain [trickler] settings')
+    else:
+        logging.warning('Ignoring a command the trickler does not know: %r', command)
+
+
+def run_pass(config, memcache, constants, hw, models, last_status=None):
+    """One pass of the daemon's idle loop: read the state, and charge if it is time to.
+
+    Returns the status tuple to compare against next pass, so the state is only logged
+    when it changes. A charge, when one runs, runs to completion inside this call.
+    """
+    handle_command(config, memcache, constants, hw.scale, models)
+
+    # Update settings from memcache.
+    auto_mode = memcache.get(constants.AUTO_MODE.value)
+    target_weight = memcache.get(constants.TARGET_WEIGHT.value)
+    target_unit = memcache.get(constants.TARGET_UNIT.value)
+    # Use percentages for PID control to avoid complexity w/ different units of weight.
+    hw.pid.SetPoint = 100.0
+    hw.scale.update()
+
+    # Set scale to match target unit.
+    if target_unit != hw.scale.unit:
+        logging.info('scale.unit: %r, target_unit: %r', hw.scale.unit, target_unit)
+        hw.scale.change_unit()
+
+    # Only log when something actually changes. Logging every pass filled the
+    # journal with tens of identical lines a second and buried real errors.
+    status = (target_weight, target_unit, hw.scale.weight, hw.scale.unit, auto_mode)
+    if status != last_status:
+        logging.info(
+            'target: %s %s scale: %s %s auto_mode: %s',
+            target_weight,
+            target_unit,
+            hw.scale.weight,
+            hw.scale.unit,
+            auto_mode)
+
+    # Powder pan in place, scale stable, ready to trickle.
+    if (hw.scale.weight >= 0 and
+            hw.scale.weight < target_weight and
+            hw.scale.unit == target_unit and
+            hw.scale.is_stable and
+            auto_mode):
+        # One bad charge should cost a charge, not the daemon. Dying here takes the
+        # service down with it, and the restart wipes the log context along with the
+        # settings, which makes the original error very hard to find.
+        try:
+            settings = trickler_settings(config, memcache, constants, hw.scale, target_unit)
+            # A charge ends when the remainder is inside cutoff_weight, which with the
+            # shipped value is one division light on purpose. That pan is finished, not
+            # under target: without this check the loop started a new charge on it every
+            # pass, each one complete before it fired a pulse, and recorded every one --
+            # 28 zero-pulse "charges" in 30 simulated passes, and on the Pi about ten a
+            # second until the pan was lifted.
+            if target_weight - hw.scale.weight <= settings.cutoff_weight:
+                return status
+            # Stops the servo from dumping powder twice if the scale weight dips below the target weight
+            if ((target_weight - hw.scale.weight) / target_weight) >= 0.5:
+                # Wait a second to dump powder and start trickling.
+                time.sleep(1)
+                if not dump_or_stop(hw.servo_motor, hw.scale, settings, memcache,
+                                    constants,
+                                    (hw.trickler_motor1, hw.trickler_motor2)):
+                    return status
+            # Run trickler loop.
+            trickler_loop(config, memcache, constants, hw.pid, hw.trickler_motor1,
+                          hw.trickler_motor2, hw.scale, target_weight, target_unit,
+                          hw.pidtune_logger, settings=settings,
+                          model=models.for_settings(settings))
+        except Exception:
+            logging.exception('Charge failed. Motors stopped; the trickler is still running.')
+            hw.trickler_motor1.off()
+            hw.trickler_motor2.off()
+            # Don't spin on a fault that repeats every pass.
+            time.sleep(1)
+    return status
+
+
+def main(config, memcache, args, pidtune_logger):
+    """Main trickler function. This runs everything."""
+    constants = enum.Enum('memcache_vars', config['memcache_vars'])
+    hw = build_hardware(config, memcache, pidtune_logger)
+
     # Seed memcache, without disturbing anything already set. A restart used to stamp
     # these defaults over whatever the user had entered, so any crash silently threw away
     # the target weight and switched auto mode off -- which hid the crash itself.
@@ -941,69 +1222,26 @@ def main(config, memcache, args, pidtune_logger):
     seed_memcache(memcache, {
         constants.AUTO_MODE.value: args.auto_mode or False,
         constants.TARGET_WEIGHT.value: args.target_weight or decimal.Decimal('0.0'),
-        constants.TARGET_UNIT.value: scale.unit_map.get(args.target_unit, 'GN'),
+        constants.TARGET_UNIT.value: hw.scale.unit_map.get(args.target_unit, 'GN'),
     }, overwrite={
         constants.AUTO_MODE.value: bool(args.auto_mode),
         constants.TARGET_WEIGHT.value: bool(args.target_weight),
         constants.TARGET_UNIT.value: False,
     })
 
+    models = FeedModels(memcache, constants)
+    # Load the active powder's learned rates now rather than at the first charge, so the
+    # tuning page shows them straight after a reboot instead of "not learned yet".
+    try:
+        models.for_settings(trickler_settings(
+            config, memcache, constants, hw.scale, memcache.get(constants.TARGET_UNIT.value)))
+    except Exception:
+        logging.warning('Could not load the learned feed rates at startup.', exc_info=True)
+
     # Outer-most control loop for the whole trickler system.
     last_status = None
     while 1:
-        # Update settings from memcache.
-        auto_mode = memcache.get(constants.AUTO_MODE.value)
-        target_weight = memcache.get(constants.TARGET_WEIGHT.value)
-        target_unit = memcache.get(constants.TARGET_UNIT.value)
-        # Use percentages for PID control to avoid complexity w/ different units of weight.
-        pid.SetPoint = 100.0
-        scale.update()
-
-        # Set scale to match target unit.
-        if target_unit != scale.unit:
-            logging.info('scale.unit: %r, target_unit: %r', scale.unit, target_unit)
-            scale.change_unit()
-
-        # Only log when something actually changes. Logging every pass filled the
-        # journal with tens of identical lines a second and buried real errors.
-        status = (target_weight, target_unit, scale.weight, scale.unit, auto_mode)
-        if status != last_status:
-            logging.info(
-                'target: %s %s scale: %s %s auto_mode: %s',
-                target_weight,
-                target_unit,
-                scale.weight,
-                scale.unit,
-                auto_mode)
-            last_status = status
-
-        # Powder pan in place, scale stable, ready to trickle.
-        if (scale.weight >= 0 and
-                scale.weight < target_weight and
-                scale.unit == target_unit and
-                scale.is_stable and
-                auto_mode):
-            # One bad charge should cost a charge, not the daemon. Dying here takes the
-            # service down with it, and the restart wipes the log context along with the
-            # settings, which makes the original error very hard to find.
-            try:
-                settings = trickler_settings(config, memcache, constants, scale, target_unit)
-                # Stops the servo from dumping powder twice if the scale weight dips below the target weight
-                if ((target_weight - scale.weight) / target_weight) >= 0.5:
-                    # Wait a second to dump powder and start trickling.
-                    time.sleep(1)
-                    if not dump_or_stop(servo_motor, scale, settings, memcache,
-                                        constants,
-                                        (trickler_motor1, trickler_motor2)):
-                        continue
-                # Run trickler loop.
-                trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_motor2, scale, target_weight, target_unit, pidtune_logger)
-            except Exception:
-                logging.exception('Charge failed. Motors stopped; the trickler is still running.')
-                trickler_motor1.off()
-                trickler_motor2.off()
-                # Don't spin on a fault that repeats every pass.
-                time.sleep(1)
+        last_status = run_pass(config, memcache, constants, hw, models, last_status)
 
 
 if __name__ == '__main__':

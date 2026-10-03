@@ -152,6 +152,11 @@ max_rows = 500
 pulses_path = /var/lib/opentrickler/pulses.csv
 # About 300 charges' worth. A two-point fit needs a few dozen pulses at each length.
 pulses_max_rows = 5000
+# What the trickler has learned about each powder -- the feed rate at each pulse speed --
+# kept here so it survives a reboot. memcache holds a live copy for the tuning page, and
+# "Clear learned feed rate" there forgets both. Defaults to learned.json beside the
+# charge file.
+learned_path = /var/lib/opentrickler/learned.json
 
 
 [profiles]
@@ -237,3 +242,6 @@ TRICKLER_SETTINGS = trickler_settings
 ACTIVE_PROFILE = active_profile
 DUMP_ERROR = dump_error
 TRICKLER_FAST_PULSE_RATE = trickler_fast_pulse_rate
+# The web app leaves requests for the trickler daemon here; the daemon takes and acts on
+# them between charges. Today: forgetting a learned feed rate.
+TRICKLER_COMMAND = trickler_command

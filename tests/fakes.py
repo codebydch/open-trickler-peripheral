@@ -40,6 +40,8 @@ def load_config(history_path=None, profiles=None, active_profile=None,
         # the pulse file at the same scratch directory as the charges.
         config['history']['pulses_path'] = os.path.join(
             os.path.dirname(str(history_path)), 'pulses.csv')
+        config['history']['learned_path'] = os.path.join(
+            os.path.dirname(str(history_path)), 'learned.json')
 
     for name, settings in (profiles or {}).items():
         section = 'profile:%s' % name

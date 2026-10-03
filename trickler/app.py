@@ -242,9 +242,13 @@ def update_trickler_config():
     """Applies submitted tuning values live, and writes them back to the config file."""
     if 'reset_learned' in request.form:
         profile = active_profile()
+        # The memcache copy goes now, so the page reflects it at once. The daemon owns
+        # the copy that survives a reboot, so it is asked to forget that one.
         for key in (constants.TRICKLER_PULSE_RATE.value,
                     constants.TRICKLER_FAST_PULSE_RATE.value):
             memcache_client.delete('%s:%s' % (key, profile) if profile else key)
+        memcache_client.set(helpers.command_key(constants),
+                            {'command': 'reset_learned', 'profile': profile})
         logging.info('Cleared the learned pulse rates.')
         return render_config(
             notice='Learned pulse rates cleared. The next charge starts from the '

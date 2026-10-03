@@ -92,6 +92,9 @@ class TuningPageTest(AppTestCase):
         self.memcache['trickler_pulse_rate'] = 0.5
         self.client.post('/app/config/update', data={'reset_learned': '1'})
         self.assertNotIn('trickler_pulse_rate', self.memcache)
+        # The copy that survives a reboot is the daemon's, so it is asked to forget it.
+        self.assertEqual(self.memcache['trickler_command'],
+                         {'command': 'reset_learned', 'profile': ''})
 
 
 class StatusTest(AppTestCase):

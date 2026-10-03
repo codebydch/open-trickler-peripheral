@@ -174,6 +174,7 @@ class HistoryFilesTest(unittest.TestCase):
         charge after an update, rather than silently not at all."""
         files = helpers.history_files(self.config(path='/var/lib/opentrickler/charges.csv'))
         self.assertEqual(files.pulses, '/var/lib/opentrickler/pulses.csv')
+        self.assertEqual(files.learned, '/var/lib/opentrickler/learned.json')
         self.assertEqual(files.max_rows, 500)
         self.assertEqual(files.pulses_max_rows, 5000)
 
@@ -185,7 +186,7 @@ class HistoryFilesTest(unittest.TestCase):
 
     def test_switched_off_means_no_files_at_all(self):
         files = helpers.history_files(self.config(enabled='False', path='/a/charges.csv'))
-        self.assertEqual(files, ('', '', 0, 0))
+        self.assertEqual(files, ('', '', '', 0, 0))
 
     def test_no_section_means_no_files(self):
         config = fakes.load_config()

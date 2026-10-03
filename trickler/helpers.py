@@ -11,6 +11,7 @@ import collections
 import configparser
 import csv
 import decimal
+import json
 import logging
 import math
 import os
@@ -341,28 +342,85 @@ PULSE_COLUMNS = (
 
 
 HistoryFiles = collections.namedtuple(
-    'HistoryFiles', ('charges', 'pulses', 'max_rows', 'pulses_max_rows'))
+    'HistoryFiles', ('charges', 'pulses', 'learned', 'max_rows', 'pulses_max_rows'))
 
 
 def history_files(config):
     """Where the daemon records charges and pulses, read from [history].
 
-    Both paths are '' when recording is switched off. The pulse file defaults to
-    `pulses.csv` beside the charge file, so a config written before `pulses_path` existed
-    records pulses from the first charge after an update rather than silently not at all.
-    The daemon and the web app both go through here, so they can't disagree about where
-    the files are.
+    Every path is '' when recording is switched off. The pulse file and the learned-state
+    file default to `pulses.csv` and `learned.json` beside the charge file, so a config
+    written before those keys existed records from the first charge after an update
+    rather than silently not at all. The daemon and the web app both go through here, so
+    they can't disagree about where the files are.
     """
     section = (config['history'] if config.has_section('history')
                else configparser.ConfigParser()['DEFAULT'])
     if not section.getboolean('enabled', True):
-        return HistoryFiles('', '', 0, 0)
+        return HistoryFiles('', '', '', 0, 0)
     charges = section.get('path', '')
+    directory = os.path.dirname(charges)
     pulses = section.get('pulses_path', '')
-    if not pulses and charges:
-        pulses = os.path.join(os.path.dirname(charges), 'pulses.csv')
-    return HistoryFiles(charges, pulses, section.getint('max_rows', 500),
+    learned = section.get('learned_path', '')
+    if charges:
+        pulses = pulses or os.path.join(directory, 'pulses.csv')
+        learned = learned or os.path.join(directory, 'learned.json')
+    return HistoryFiles(charges, pulses, learned, section.getint('max_rows', 500),
                         section.getint('pulses_max_rows', 5000))
+
+
+def read_json(path):
+    """A JSON file as a dict, or {} if it is missing, unreadable or not a dict."""
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        logging.debug('No readable JSON at %s', path, exc_info=True)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_json(path, data):
+    """Writes a dict as JSON, atomically, world-readable, creating the directory.
+
+    Raises OSError if it cannot; the caller decides whether that matters.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        'w', encoding='utf-8', dir=directory or '.', delete=False)
+    try:
+        with handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write('\n')
+        os.replace(handle.name, path)
+        os.chmod(path, 0o644)
+    except BaseException:
+        if os.path.exists(handle.name):
+            os.unlink(handle.name)
+        raise
+
+
+# --- Commands to the daemon ------------------------------------------------------------
+
+# The web app asks the trickler to do something by leaving a dict under this memcache key;
+# the daemon's idle loop takes it and acts. Memcache is already how the two talk, and the
+# daemon owns the hardware and the learned-state file, so anything that touches either --
+# forgetting a learned rate today, running a calibration routine in Phase 2 -- goes this
+# way rather than the web app reaching in itself.
+DEFAULT_COMMAND_KEY = 'trickler_command'
+
+
+def command_key(constants):
+    """The memcache key commands travel under.
+
+    Falls back to the default when the config file's [memcache_vars] predates the key:
+    the constants enum is built from that section, and a daemon that crashed on a
+    missing member would take the whole machine down over one line of config.
+    """
+    member = getattr(constants, 'TRICKLER_COMMAND', None)
+    return member.value if member is not None else DEFAULT_COMMAND_KEY
 
 
 def append_rows(path, new_rows, columns, max_rows):
