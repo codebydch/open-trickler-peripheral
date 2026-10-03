@@ -72,6 +72,10 @@ pulse_off_time = 0.1
 # first moment after a pulse the powder is still in the air and the pan is undisturbed,
 # so the scale reports the old weight as stable. Believing that reads the pulse as having
 # delivered nothing, and the next one as double. Set this above the scale's reporting lag.
+# Measured 2026-10-03 on the reference machine: at 0.3 the reading at "complete" matched
+# what finally landed in 0 of 4 charges -- 1-3 divisions arrived after it -- and at 0.6 in
+# 2 of 3, at about a quarter of a second more per pulse. 0.3 is kept for speed; set 0.6 if
+# you would rather the record and the learned rate be honest than the charge be quick.
 settle_min_time = 0.3
 # Motor speed (PWM %) used while pulsing. This bypasses trickler_min_pwm, so it may
 # be set lower, but never below stall_pwm.
@@ -81,7 +85,9 @@ pulse_pwm = 25
 # charge is fewer, bigger pulses rather than a faster motor throughout -- a faster motor
 # throughout would coarsen the smallest dose the machine can place, which is what sets
 # its accuracy. The last pulses drop back to pulse_pwm above. Set this equal to pulse_pwm
-# to use one speed for the whole final approach.
+# to use one speed for the whole final approach. Measured 2026-10-03 on the reference
+# machine: 45% drops 1.1-1.4x the powder per pulse of 30%; one speed at 30% took 3-5 more
+# pulses a charge and landed heavy just as often, so two speeds stay.
 pulse_fast_pwm = 45
 # Grains still to go when pulsing drops from the fast speed to the fine one.
 pulse_fast_until = 0.10

@@ -189,7 +189,9 @@ TRICKLER_SETTINGS = (
         'settle_min_time', 'Minimum settle wait', '0.3', 0.0, 5.0, 0.05,
         'Seconds after a pulse before a stable reading is believed. Below the scale\'s '
         'own reporting lag, a pulse gets weighed before its powder has landed, which '
-        'reads as delivering nothing and makes the feeder over-pulse.'),
+        'reads as delivering nothing and makes the feeder over-pulse. 0.3 is quick; 0.6 '
+        'credits the last grains of a pulse to the pulse that fired them rather than the '
+        'next one, at about a quarter-second a pulse.'),
     TricklerSetting(
         'pulse_pwm', 'Pulse speed', '25', 0.0, 100.0, 1.0,
         'PWM %. Motor speed for the fine pulses that finish a charge. Never actually '

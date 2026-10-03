@@ -25,7 +25,7 @@ what a new session would otherwise get wrong.
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
-.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 193 tests
+.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 249 tests
 ```
 
 No pytest. Use 3.13 -- it's what the Pi runs, and 3.13 has broken this code before when
@@ -62,26 +62,60 @@ defaults, so they keep testing the same thing when a default moves.
   Judging pulses one at a time and dropping the zero-dose ones biased it 3x high.
 - **At 30% pulse drive: steady feed 0.217 gn/s, motor spin-up 0.118 s.** From a two-point
   fit -- 120 pulses at 0.2 s averaged 0.0178 gn, 32 at 0.4 s averaged 0.0613. Twice the
-  pulse gave 3.4x the powder, and only a long spin-up explains that.
+  pulse gave 3.4x the powder, and only a long spin-up explains that. That fit was taken at
+  a 0.3 s settle. With each pulse's tail credited to the pulse that fired it (0.6 s settle,
+  2026-10-03), 30% measured 0.10-0.18 gn/s over a run and 45% 0.20-0.26 -- lower, and
+  varying charge to charge with the state of the tube.
+- **Dose is only weakly coupled to pulse length.** On 2026-10-03, pulses of 0.15, 0.25 and
+  0.40 s all dropped anywhere from 0 to 4 grains: ~45% of pulses with 0.28 s of movement
+  dropped nothing, ~20% dropped four or more. The state of the tube decides, not the
+  length, so no length between the floor and the cap makes a final pulse safe.
 - **The first pulse after the tube has been running is a burst** -- 2-10x the steady rate,
   because the tube is loaded. On a short pulse a burst implies a huge rate and drags the
-  stored rate with it (seen: 0.302 -> 0.665 gn/s from one four-grain pulse).
+  stored rate with it (seen: 0.302 -> 0.665 gn/s from one four-grain pulse). Part of that,
+  at a 0.3 s settle, is the *previous* pulse's tail landing in the next pulse's window and
+  being credited to it: the fine rate learned that way ran 0.66-1.25 gn/s against a real
+  0.1-0.2. Harmless while fine pulses clamp to the 0.15 s minimum; wrong as a stored number.
+- **The rate learned in the endgame collapses on a run of zero-dose pulses** (0.179 ->
+  0.068 over 15 pulses, charge 03:11:10), which sizes the "one-grain" pulse at the 0.4 s
+  cap, which then drops four grains at 0.06 remaining. The learning loop steered into the
+  overshoot; it did not just wander.
+- **An idle pan's *stable* reading flickers +/-1 division every few seconds.** A single
+  pulse's dose therefore carries +/-0.02 of scale noise, and a rate from one short pulse is
+  noise with a signal in it.
 - **Charge time is set by where continuous trickling hands over**, at roughly 17 s per
   grain left for the pulse feeder. `rate_window = 12` (~0.5 s) keeps that handover steady;
   at 4 samples it measured the scale's 0.02 step instead of a rate.
-- Current performance: ~10-13 s a charge, finishing 54.98-55.02 on a 55.00 target.
+- Current performance (2026-10-03, 30/45, settle 0.3): 4-15 pulses a charge, pulse phase
+  3-12 s, 12-15 s from dump to complete. The completion reading is 54.98 by design, but
+  the display afterwards read 55.00-55.04: in 0 of 4 charges did the reading match what
+  landed, with tails of 1-3 divisions arriving after "complete". At a 0.6 s settle, 2 of
+  3 matched. `charges.csv` records the completion reading, not what landed; only the
+  display knows that.
 
 ## Decided, with the reason -- don't relitigate without new evidence
 
 - **`cutoff_weight = 0.02`** -- stops a grain light on purpose. A light charge gets
-  trickled up; a heavy one has to be dumped. The owner's call.
+  trickled up; a heavy one has to be dumped -- or, as the owner now does, the extra grain
+  is lifted out by hand. Light-by-design stays the aim; when it conflicts with speed, speed
+  wins (see `settle_min_time`).
 - **`pulse_on_time = 0.4`** -- at 0.2 the cap bound nearly every pulse; past 0.4 the gain
   flattens and clumps start to overshoot.
-- **Two-speed pulsing was tested and found not to pay**: 45% drive gave about 1.1x the
-  powder per pulse of 30%, not the 2.5x drive suggests, and the fast pulses load the tube
-  so the first fine pulse bursts. The code stays in, dormant when `pulse_fast_pwm` =
-  `pulse_pwm`. The owner is currently running the shipped 25/45 and changes such values by
-  hand on the tuning page; don't move the shipped defaults without asking.
+- **Two-speed pulsing stays on, at `pulse_pwm = 30` / `pulse_fast_pwm = 45`** -- that is
+  what the owner runs (the pulse record says so; earlier notes saying 30/30 or 25/45 were
+  wrong). 45% drive gives 1.1-1.4x the powder per pulse of 30%, not the 2.5x drive
+  suggests, but on 2026-10-03 one speed at 30/30 took 3-5 more pulses a charge and landed
+  heavy just as often (1 in 3 either way), including a four-grain burst with no fast pulse
+  before it. Fast pulses are not the burst source; the continuous phase loads the tube
+  too. The shipped example still says 25/45; don't move shipped defaults without asking.
+- **`settle_min_time = 0.3` -- the owner's call, for speed.** Tested 2026-10-03: at 0.3 the
+  reading at "complete" matched what landed in 0 of 4 charges (tails of 1-3 divisions
+  arrived afterwards); at 0.6 it matched in 2 of 3, and the fine-rate measurement became
+  honest -- at +0.2-0.3 s a pulse, 1.5-3 s a charge. The owner prefers the seconds and
+  lifts a heavy grain by hand. Consequence for code: doses recorded at 0.3 under-credit the
+  pulse that fired them, so Phase 2 must not learn a rate from single short pulses, or must
+  make the wait adaptive (short while the reading is still, long only while powder is
+  landing) -- which is the way to have both.
 - An "E" on the scale when the pan is lifted was a scale fault, fixed by resetting the
   scale -- not code.
 
@@ -115,26 +149,48 @@ defaults, so they keep testing the same thing when a default moves.
   and spin-up from it, so bench evidence no longer has to be pasted from the journal.
 - Reading pulse logs: `remainder: R ... scale: W ... pulsed T s -> D (rate X/s)` -- R is
   before the pulse, W after, and X is the **fine** rate only. Fast-pulse learning isn't
-  logged.
+  logged; `pulses.csv` has both, with the rate at the speed each pulse used.
+- At a 0.3 s settle, one pulse's powder is often credited to the next: `pulses.csv` and
+  the learned rate then disagree with the scale display, and the display is right. Check
+  the display after a charge before trusting a dose in the record.
 
 ## Phase 2: learning and adjusting on the fly
 
-The next piece of work. What's known going in:
+The next piece of work. The bench session of 2026-10-03 -- nine charges, every pulse in
+`pulses.csv`, the display read after each charge -- changed its order.
 
-- **Per-powder calibration** was the owner's original idea: pick a powder, run a short
-  routine, store its constants per profile. Rate and spin-up both come out of ~30 pulses
-  at two lengths. Also worth capturing: dump weight and stall PWM. Powders differ in grain
-  shape, length and weight, and the measure's drop volume changes per powder and calibre.
+- **Owner's priorities: speed and accuracy together; when they conflict, speed.** A heavy
+  grain is lifted by hand. Don't trade seconds for a lower heavy rate without asking.
+- **First target: the endgame, not calibration.** What decides light or heavy is not the
+  feed rate but the *dose distribution* of a pulse -- how often zero, how often four
+  grains -- and how it depends on what ran just before. The rate learned from one-grain
+  pulses is noise (0.09 to 1.25 gn/s in one evening), and its collapse on a run of zeros
+  sized the pulse that landed heavy. In order:
+  1. Simulator grain model to match the record: ~45% of pulses with 0.28 s of movement
+     drop nothing, ~20% drop four or more grains, and the odds depend on tube state (loaded
+     by the continuous phase or by fast pulses). The current model's one clump chance and
+     +/-25% per grain cannot produce 0, 0, 0, 0, 0.02 and then 0.08.
+  2. Stop learning the rate from one-grain pulses: size the last pulses from the aimed
+     pulses' rate, which sat at 0.13-0.26 all night, or persist the window so a single
+     short pulse cannot move it (`FeedModel` outlives the charge; `new_charge` clears the
+     window, so that is a one-line change). The logged 0.302 -> 0.665 is one 0.066 s
+     pulse's 0.08 gn blended at `PULSE_RATE_LEARN`.
+  3. Adaptive settle wait: short while the reading is still, long only while powder is
+     still landing. That is how to have the speed of 0.3 and the honesty of 0.6.
+  4. A stop rule that knows a pulse can drop four grains: at 0.06 remaining no pulse length
+     is safe, so the choice is where to stop light and how often to accept heavy -- and
+     the owner has said which way that goes.
+  5. Then **per-powder calibration**, the owner's original idea: pick a powder, run a short
+     routine, store its constants per profile. Rate and spin-up both come out of ~30 pulses
+     at two lengths. Also worth capturing: dump weight and stall PWM. Powders differ in
+     grain shape, length and weight, and the measure's drop volume changes per powder and
+     calibre. The `TRICKLER_COMMAND` key is where "calibrate" goes.
 - **Owner's constraints for any calibration routine:** empty the pan between runs (cups
   hold ~200 gn and powder bounces off the pile onto the scale); an empty tube takes about
   10 s of running to fill; a full-power run fills the tube while pulsing lays the grains
   out, so delivery starts slow and then settles.
-- **Known weakness to fix there:** each charge's rate window starts empty
-  (`FeedModel.new_charge` clears it), so one burst on a short pulse can swing the stored
-  rate a long way -- the logged 0.302 -> 0.665 is exactly one 0.066 s pulse's 0.08 gn
-  blended at `PULSE_RATE_LEARN`. Persisting the window (the model already outlives the
-  charge, so that is a one-line change) or bounding a single update are the candidates.
-- **Endgame stalls:** a pulse sized for exactly one grain delivers nothing about half the
-  time. Aiming the last pulses at `remainder - cutoff_weight` is safe and untested.
-- Untested lever: `settle_min_time` (0.3 s of each ~0.8 s pulse cycle). Too low and a
-  pulse is weighed before its powder lands.
+- **Endgame stalls:** a pulse sized for one grain delivers nothing about half the time
+  (seven zeros in fifteen pulses on 03:11:10). Aiming the last pulses at
+  `remainder - cutoff_weight` is safe and untested.
+- Every code idea above is tested in the simulator first, then one change per bench run,
+  three charges, display noted after each.
