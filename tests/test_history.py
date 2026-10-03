@@ -212,6 +212,23 @@ class StatisticsTest(unittest.TestCase):
         stats = helpers.charge_statistics(self.rows([0.00, 0.01, 0.05, -0.30]))
         self.assertAlmostEqual(stats['within'], 0.5)
 
+    def test_what_landed_beats_the_completion_reading(self):
+        """At complete the pan read a grain light; two seconds later it was a grain
+        heavy. The statistics must follow the pan."""
+        row = {'outcome': 'complete', 'target': '45.00', 'final': '44.98',
+               'error': '-0.02', 'landed': '45.02'}
+        self.assertAlmostEqual(helpers.charge_error(row), 0.02)
+        stats = helpers.charge_statistics([row])
+        self.assertAlmostEqual(stats['mean'], 0.02)
+        self.assertEqual(stats['heavy'], 1.0)
+
+    def test_rows_without_landed_still_count(self):
+        rows = [{'outcome': 'complete', 'target': '45.00', 'final': '44.98',
+                 'error': '-0.02', 'landed': ''}]
+        stats = helpers.charge_statistics(rows)
+        self.assertAlmostEqual(stats['mean'], -0.02)
+        self.assertEqual(stats['heavy'], 0.0)
+
     def test_only_completed_charges_count(self):
         rows = self.rows([0.01]) + self.rows([9.99], outcome='aborted')
         stats = helpers.charge_statistics(rows)
@@ -303,6 +320,50 @@ class RecordingTest(TempPathTest):
                                wraps=helpers.append_pulses) as append:
             run_charge(machine, D('45.00'), config=config)
         self.assertEqual(append.call_count, 1)
+
+    def test_what_landed_is_recorded(self):
+        """The completion reading is taken with powder still in the air; the history
+        needs the pan a couple of seconds later to know light from heavy."""
+        machine = fakes.SimulatedMachine('44.50')
+        at_complete = []
+        real_landed = main.landed_weight
+
+        def remember_then_wait(scale, wait, clock=None):
+            at_complete.append(scale.weight)
+            return real_landed(scale, wait, clock)
+        with mock.patch.object(main, 'landed_weight', remember_then_wait):
+            run_charge(machine, D('45.00'), config=fakes.load_config(history_path=self.path))
+        row = helpers.read_charges(self.path)[0]
+        self.assertNotEqual(row['landed'], '')
+        self.assertEqual(D(row['final']), at_complete[0],
+                         'final is the reading the charge ended on, not a later one')
+        self.assertGreaterEqual(D(row['landed']), D(row['final']),
+                                'powder only ever lands, it does not leave')
+        self.assertAlmostEqual(float(row['landed']), float(machine.true_weight), delta=0.03)
+
+    def test_landed_is_blank_when_switched_off(self):
+        machine = fakes.SimulatedMachine('44.50')
+        run_charge(machine, D('45.00'),
+                   config=fakes.load_config(history_path=self.path, landed_wait=0))
+        self.assertEqual(helpers.read_charges(self.path)[0]['landed'], '')
+
+    def test_landed_is_blank_when_the_pan_is_lifted(self):
+        machine = fakes.SimulatedMachine('44.50')
+        config = fakes.load_config(history_path=self.path)
+        real_landed = main.landed_weight
+
+        def lift_then_read(scale, wait, clock=None):
+            machine.true_weight = D('-5')
+            return real_landed(scale, wait, clock)
+        with mock.patch.object(main, 'landed_weight', lift_then_read):
+            run_charge(machine, D('45.00'), config=config)
+        self.assertEqual(helpers.read_charges(self.path)[0]['landed'], '')
+
+    def test_recorded_pulses_say_where_they_came_from(self):
+        machine = fakes.SimulatedMachine('44.50')
+        run_charge(machine, D('45.00'), config=fakes.load_config(history_path=self.path))
+        pulses = helpers.read_pulses(os.path.join(self.directory, 'pulses.csv'))
+        self.assertTrue(all(p['source'] == 'charge' for p in pulses))
 
     def test_pulses_are_off_when_history_is_off(self):
         config = fakes.load_config()

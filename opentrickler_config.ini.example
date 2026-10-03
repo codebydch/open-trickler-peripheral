@@ -140,6 +140,13 @@ max_dump_attempts = 3
 # Seconds between attempts, with the arm returned so the handle is unloaded. Backing off
 # and pushing again is also what is most likely to shift a caught kernel.
 dump_retry_pause = 1.0
+# Seconds to keep reading the scale after a charge completes, to record what actually
+# landed. The charge is declared complete the moment the reading is inside cutoff_weight,
+# and powder is still falling then: on the bench (2026-10-03) 1-3 divisions arrived after
+# that reading in four charges of four. This is how the history page tells a heavy charge
+# from a light one. Not part of the charge time -- the motors are off and you are reaching
+# for the pan. Set 0 to skip it.
+landed_wait = 2.0
 
 
 [history]

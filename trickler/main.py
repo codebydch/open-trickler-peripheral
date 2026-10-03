@@ -78,6 +78,11 @@ FINAL_GRAINS = 5
 # cycle should not wedge the daemon on one charge.
 MAX_PULSE_PHASE_SECONDS = 120.0
 
+# The idle loop logs its state when it changes, but no more often than this. Lifting and
+# emptying the pan changes the reading on every frame: sixty lines in nine seconds on the
+# bench, for nothing anyone needed to read.
+STATUS_LOG_INTERVAL = 1.0
+
 # Give up on a charge after this long with no usable scale reading at all. Individual
 # reads fail routinely -- the serial line is read faster than the scale writes to it --
 # so this has to be far longer than any normal gap between frames.
@@ -104,6 +109,7 @@ TricklerSettings = collections.namedtuple('TricklerSettings', (
     'stall_drop_weight',
     'max_dump_attempts',
     'dump_retry_pause',
+    'landed_wait',
     'profile',
     'history_path',
     'history_max_rows',
@@ -142,7 +148,7 @@ class FeedRateEstimator:
         return max(decimal.Decimal('0'), (new_weight - old_weight) / elapsed)
 
 
-def settled_weight(scale, timeout, min_wait=0.0):
+def settled_weight(scale, timeout, min_wait=0.0, clock=None):
     """Reads the scale until it reports a stable weight, or `timeout` seconds pass.
 
     `min_wait` is the time that must pass before a stable reading is believed. It
@@ -150,16 +156,41 @@ def settled_weight(scale, timeout, min_wait=0.0):
     the air, so the pan is undisturbed and the scale happily reports the *old* weight as
     stable. Trusting that reads the feed as having delivered nothing, and the one after
     it as having delivered double.
+
+    `clock` replaces time.time, so a simulated charge can run on simulated time.
     """
-    start = time.time()
+    now = clock or time.time
+    start = now()
     deadline = start + timeout
-    while time.time() < deadline:
+    while now() < deadline:
         scale.update()
-        if time.time() - start < min_wait:
+        if now() - start < min_wait:
             continue
         if getattr(scale, 'is_fresh', True) and scale.is_stable:
             break
     return scale.weight
+
+
+def landed_weight(scale, wait, clock=None):
+    """What the pan weighs once the powder still in the air has come down.
+
+    Keeps reading for `wait` seconds after a charge is complete and returns the last
+    reading, or None if the pan was lifted first. The completion reading is taken the
+    moment the remainder is inside cutoff_weight, and on the bench 1-3 divisions landed
+    after it in four charges of four -- so the history could not tell a light charge from
+    a heavy one. The motors are off for this and the operator is reaching for the pan, so
+    it costs the charge nothing.
+    """
+    now = clock or time.time
+    deadline = now() + wait
+    weight = scale.weight
+    while now() < deadline:
+        scale.update()
+        if getattr(scale, 'is_fresh', True):
+            weight = scale.weight
+        if weight < 0:
+            return None
+    return weight
 
 
 class FeedModel:
@@ -377,17 +408,25 @@ class PulseFeeder:
     result corrects the estimate used to size the next one.
     """
 
-    def __init__(self, motor, scale, settings, memcache=None, constants=None, model=None):
+    def __init__(self, motor, scale, settings, memcache=None, constants=None, model=None,
+                 clock=None, sleep=None):
         """Constructor.
 
         `model` is the FeedModel for this powder, kept by the daemon across charges. Left
         out, a transient one is built from `memcache` and `constants` -- what the tests
         and the older call sites do. It loads and saves exactly what the long-lived one
         would; it just does not outlive the charge.
+
+        `clock` and `sleep` replace time.time and time.sleep, so the calibration routine
+        can run thousands of simulated charges through this exact code in milliseconds.
+        Left out, real time is used -- looked up at each call, so a test that patches the
+        time module still works.
         """
         self._motor = motor
         self._scale = scale
         self._settings = settings
+        self._clock = clock
+        self._sleep = sleep
         if model is None:
             model = FeedModel(settings, memcache=memcache, constants=constants)
         else:
@@ -434,6 +473,13 @@ class PulseFeeder:
     def model(self):
         """The FeedModel this feeder learns into."""
         return self._model
+
+    def now(self):
+        """The time, on whichever clock this feeder runs on."""
+        return (self._clock or time.time)()
+
+    def _wait(self, seconds):
+        (self._sleep or time.sleep)(seconds)
 
     @property
     def settings(self):
@@ -516,7 +562,8 @@ class PulseFeeder:
 
     def settled_weight(self, min_wait=0.0):
         """The settled scale reading, using this feeder's configured settle times."""
-        return settled_weight(self._scale, self._settings.settle_timeout, min_wait)
+        return settled_weight(self._scale, self._settings.settle_timeout, min_wait,
+                              clock=self._clock)
 
     def feed(self, remainder):
         """Fires one pulse aimed at part of `remainder`, returning what it actually delivered.
@@ -557,10 +604,10 @@ class PulseFeeder:
         before = self._scale.weight
         self.pulses += 1
         self._motor.set_speed(self._pulse_speed(fast))
-        time.sleep(on_time)
+        self._wait(on_time)
         self._motor.off()
         # Let the powder land before asking the scale what happened.
-        time.sleep(self._settings.pulse_off_time)
+        self._wait(self._settings.pulse_off_time)
         dose = self.settled_weight(self._settings.settle_min_time) - before
         self._learn(on_time, dose, fast)
         self.records.append({
@@ -669,7 +716,7 @@ def learned_rate_key(constants, profile, fast=False):
 
 
 def record_charge(settings, target_weight, final_weight, target_unit, outcome,
-                  pulses, seconds, learned_rate):
+                  pulses, seconds, learned_rate, landed=None):
     """Writes one finished charge to the history file.
 
     Never raises. A history file that cannot be written is a nuisance; a trickler that
@@ -689,6 +736,7 @@ def record_charge(settings, target_weight, final_weight, target_unit, outcome,
             'pulses': pulses,
             'seconds': round(seconds, 1),
             'learned_rate': round(learned_rate, 4),
+            'landed': '' if landed is None else landed,
         }, settings.history_max_rows)
     except Exception:
         # Called from a finally block, where raising would mask whatever actually ended
@@ -709,7 +757,8 @@ def record_pulses(settings, records, target_unit):
     unit = getattr(target_unit, 'name', target_unit)
     try:
         helpers.append_pulses(settings.pulses_path, [
-            dict(record, profile=settings.profile, unit=unit) for record in records
+            dict(record, profile=settings.profile, unit=unit, source='charge')
+            for record in records
         ], settings.pulses_max_rows)
     except Exception:
         logging.warning('Could not record the pulses to %s', settings.pulses_path,
@@ -785,6 +834,7 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
         stall_drop_weight=decimal.Decimal(section['stall_drop_weight']) * factor,
         max_dump_attempts=int(float(section['max_dump_attempts'])),
         dump_retry_pause=float(section['dump_retry_pause']),
+        landed_wait=float(section['landed_wait']),
         profile=profile,
         history_path=history.charges,
         history_max_rows=history.max_rows,
@@ -878,10 +928,10 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
     """
     logging.info('Starting final approach. Learned rate: %r', feeder.rate)
     weight = feeder.settled_weight(feeder.settings.settle_min_time)
-    started = time.time()
+    started = feeder.now()
 
     while 1:
-        if time.time() - started > MAX_PULSE_PHASE_SECONDS:
+        if feeder.now() - started > MAX_PULSE_PHASE_SECONDS:
             logging.warning(
                 'Final approach ran for %ss without finishing, stopping. remainder: %s %s',
                 MAX_PULSE_PHASE_SECONDS, target_weight - weight, target_unit)
@@ -1062,9 +1112,20 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
         # Record here rather than at each exit, so a charge that was abandoned -- auto
         # mode switched off, pan lifted, a fault -- is visible in the history instead of
         # silently missing. `outcome` is only set where the charge actually finished.
-        record_charge(settings, target_weight, scale.weight, target_unit,
-                      outcome or 'aborted', feeder.pulses, time.time() - started,
-                      feeder.rate)
+        seconds = time.time() - started
+        # The reading the charge ended on, taken before anything reads the scale again:
+        # landed_weight() below updates scale.weight as it goes.
+        final = scale.weight
+        # What landed, not what the reading said at the instant of "complete": powder is
+        # still falling then. Only for a finished charge, and only after the motors are
+        # off, so it is on the operator's time, not the charge's.
+        landed = None
+        if outcome == 'complete' and settings.landed_wait > 0:
+            landed = landed_weight(scale, settings.landed_wait)
+            logging.info('Landed: %s %s (complete at %s)', landed, target_unit, final)
+        record_charge(settings, target_weight, final, target_unit,
+                      outcome or 'aborted', feeder.pulses, seconds, feeder.rate,
+                      landed=landed)
         record_pulses(settings, feeder.records, target_unit)
     logging.info('Trickling process stopped.')
 
@@ -1139,8 +1200,10 @@ def handle_command(config, memcache, constants, scale, models):
 def run_pass(config, memcache, constants, hw, models, last_status=None):
     """One pass of the daemon's idle loop: read the state, and charge if it is time to.
 
-    Returns the status tuple to compare against next pass, so the state is only logged
-    when it changes. A charge, when one runs, runs to completion inside this call.
+    Returns `(status, logged_at)`: the last state that was logged and when, to pass back
+    in next time, so the state is logged when it changes and not more often than
+    STATUS_LOG_INTERVAL unless the target or auto mode moved. A charge, when one runs,
+    runs to completion inside this call.
     """
     handle_command(config, memcache, constants, hw.scale, models)
 
@@ -1158,16 +1221,26 @@ def run_pass(config, memcache, constants, hw, models, last_status=None):
         hw.scale.change_unit()
 
     # Only log when something actually changes. Logging every pass filled the
-    # journal with tens of identical lines a second and buried real errors.
+    # journal with tens of identical lines a second and buried real errors. And when the
+    # reading itself is what keeps changing, no more than once a second -- the state that
+    # matters is still logged, because it is compared against the last state *logged*,
+    # not the last state seen.
     status = (target_weight, target_unit, hw.scale.weight, hw.scale.unit, auto_mode)
-    if status != last_status:
-        logging.info(
-            'target: %s %s scale: %s %s auto_mode: %s',
-            target_weight,
-            target_unit,
-            hw.scale.weight,
-            hw.scale.unit,
-            auto_mode)
+    logged, logged_at = last_status if last_status else (None, 0.0)
+    now = time.time()
+    if status != logged:
+        settings_moved = (logged is None or status[0] != logged[0] or
+                          status[1] != logged[1] or status[4] != logged[4])
+        if settings_moved or now - logged_at >= STATUS_LOG_INTERVAL:
+            logging.info(
+                'target: %s %s scale: %s %s auto_mode: %s',
+                target_weight,
+                target_unit,
+                hw.scale.weight,
+                hw.scale.unit,
+                auto_mode)
+            logged, logged_at = status, now
+    last_status = (logged, logged_at)
 
     # Powder pan in place, scale stable, ready to trickle.
     if (hw.scale.weight >= 0 and
@@ -1187,7 +1260,7 @@ def run_pass(config, memcache, constants, hw, models, last_status=None):
             # 28 zero-pulse "charges" in 30 simulated passes, and on the Pi about ten a
             # second until the pan was lifted.
             if target_weight - hw.scale.weight <= settings.cutoff_weight:
-                return status
+                return last_status
             # Stops the servo from dumping powder twice if the scale weight dips below the target weight
             if ((target_weight - hw.scale.weight) / target_weight) >= 0.5:
                 # Wait a second to dump powder and start trickling.
@@ -1195,7 +1268,7 @@ def run_pass(config, memcache, constants, hw, models, last_status=None):
                 if not dump_or_stop(hw.servo_motor, hw.scale, settings, memcache,
                                     constants,
                                     (hw.trickler_motor1, hw.trickler_motor2)):
-                    return status
+                    return last_status
             # Run trickler loop.
             trickler_loop(config, memcache, constants, hw.pid, hw.trickler_motor1,
                           hw.trickler_motor2, hw.scale, target_weight, target_unit,
@@ -1207,7 +1280,7 @@ def run_pass(config, memcache, constants, hw, models, last_status=None):
             hw.trickler_motor2.off()
             # Don't spin on a fault that repeats every pass.
             time.sleep(1)
-    return status
+    return last_status
 
 
 def main(config, memcache, args, pidtune_logger):
