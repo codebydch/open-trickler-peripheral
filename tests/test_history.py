@@ -325,9 +325,18 @@ class RecordingTest(TempPathTest):
         """The completion reading is taken with powder still in the air; the history
         needs the pan a couple of seconds later to know light from heavy."""
         machine = fakes.SimulatedMachine('44.50')
-        run_charge(machine, D('45.00'), config=fakes.load_config(history_path=self.path))
+        at_complete = []
+        real_landed = main.landed_weight
+
+        def remember_then_wait(scale, wait, clock=None):
+            at_complete.append(scale.weight)
+            return real_landed(scale, wait, clock)
+        with mock.patch.object(main, 'landed_weight', remember_then_wait):
+            run_charge(machine, D('45.00'), config=fakes.load_config(history_path=self.path))
         row = helpers.read_charges(self.path)[0]
         self.assertNotEqual(row['landed'], '')
+        self.assertEqual(D(row['final']), at_complete[0],
+                         'final is the reading the charge ended on, not a later one')
         self.assertGreaterEqual(D(row['landed']), D(row['final']),
                                 'powder only ever lands, it does not leave')
         self.assertAlmostEqual(float(row['landed']), float(machine.true_weight), delta=0.03)

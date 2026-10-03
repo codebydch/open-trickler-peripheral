@@ -1113,15 +1113,17 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
         # mode switched off, pan lifted, a fault -- is visible in the history instead of
         # silently missing. `outcome` is only set where the charge actually finished.
         seconds = time.time() - started
+        # The reading the charge ended on, taken before anything reads the scale again:
+        # landed_weight() below updates scale.weight as it goes.
+        final = scale.weight
         # What landed, not what the reading said at the instant of "complete": powder is
         # still falling then. Only for a finished charge, and only after the motors are
         # off, so it is on the operator's time, not the charge's.
         landed = None
         if outcome == 'complete' and settings.landed_wait > 0:
             landed = landed_weight(scale, settings.landed_wait)
-            logging.info('Landed: %s %s (complete at %s)', landed, target_unit, scale.weight
-                         if landed is None else landed)
-        record_charge(settings, target_weight, scale.weight, target_unit,
+            logging.info('Landed: %s %s (complete at %s)', landed, target_unit, final)
+        record_charge(settings, target_weight, final, target_unit,
                       outcome or 'aborted', feeder.pulses, seconds, feeder.rate,
                       landed=landed)
         record_pulses(settings, feeder.records, target_unit)
