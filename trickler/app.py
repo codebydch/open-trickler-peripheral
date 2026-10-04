@@ -104,7 +104,7 @@ def learned_rate(profile=None, fast=False):
     profile = active_profile() if profile is None else profile
     key = (constants.TRICKLER_FAST_PULSE_RATE.value if fast
            else constants.TRICKLER_PULSE_RATE.value)
-    return safe_get('%s:%s' % (key, profile) if profile else key)
+    return safe_get(helpers.profile_key(key, profile))
 
 
 def history_path():
@@ -503,7 +503,7 @@ def update_trickler_config():
         # the copy that survives a reboot, so it is asked to forget that one.
         for key in (constants.TRICKLER_PULSE_RATE.value,
                     constants.TRICKLER_FAST_PULSE_RATE.value):
-            memcache_client.delete('%s:%s' % (key, profile) if profile else key)
+            memcache_client.delete(helpers.profile_key(key, profile))
         memcache_client.set(helpers.command_key(constants),
                             {'command': 'reset_learned', 'profile': profile})
         logging.info('Cleared the learned pulse rates.')

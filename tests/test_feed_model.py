@@ -262,3 +262,25 @@ class SeedTest(FeedModelTest):
         model.seed(0.15)
         self.assertIsNone(model.fast_rate)
         self.assertNotIn('trickler_fast_pulse_rate', memcache)
+
+
+class ProfileNameTest(FeedModelTest):
+    """A profile is named by a person. "Hodgdon H1000" took the daemon down on the
+    bench: the name went into the memcache key raw, and memcache keys may not contain
+    whitespace."""
+
+    def test_a_name_with_a_space_learns_and_reloads_through_memcache(self):
+        memcache = fakes.FakeMemcache()
+        settings, constants = self.settings(profile='Hodgdon H1000', memcache=memcache)
+        model = main.FeedModel(settings, memcache, constants)
+        model.learn(0.2, 0.06, False, 0.02)
+        self.assertTrue(model.measured)
+        again = main.FeedModel(settings, memcache, constants)
+        self.assertAlmostEqual(again.rate, model.rate)
+        for key in memcache:
+            self.assertNotIn(' ', key)
+
+    def test_a_plain_name_keeps_the_key_it_always_had(self):
+        settings, constants = self.settings(profile='Varget', memcache=fakes.FakeMemcache())
+        self.assertEqual(main.learned_rate_key(constants, 'Varget'), 'trickler_pulse_rate:Varget')
+        self.assertEqual(main.learned_rate_key(constants, ''), 'trickler_pulse_rate')

@@ -749,7 +749,7 @@ def learned_rate_key(constants, profile, fast=False):
     """
     base = (constants.TRICKLER_FAST_PULSE_RATE.value if fast
             else constants.TRICKLER_PULSE_RATE.value)
-    return '%s:%s' % (base, profile) if profile else base
+    return helpers.profile_key(base, profile)
 
 
 def record_charge(settings, target_weight, final_weight, target_unit, outcome,

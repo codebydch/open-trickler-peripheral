@@ -247,3 +247,23 @@ class LogLevelTest(unittest.TestCase):
 
     def test_the_shipped_config_runs_at_info(self):
         self.assertEqual(helpers.log_level(helpers.load_config(CONFIG_PATH)), logging.INFO)
+
+
+class ProfileKeyTest(unittest.TestCase):
+    """memcache keys may not contain whitespace, and profiles are named by people."""
+
+    def test_a_plain_name_is_appended_as_it_was(self):
+        self.assertEqual(helpers.profile_key('trickler_pulse_rate', 'Varget'),
+                         'trickler_pulse_rate:Varget')
+
+    def test_no_profile_means_the_bare_key(self):
+        self.assertEqual(helpers.profile_key('trickler_pulse_rate', ''), 'trickler_pulse_rate')
+        self.assertEqual(helpers.profile_key('trickler_pulse_rate', None), 'trickler_pulse_rate')
+
+    def test_spaces_and_punctuation_are_encoded(self):
+        key = helpers.profile_key('trickler_pulse_rate', 'Hodgdon H1000 (lot 3)')
+        self.assertNotRegex(key, r'[\s()]')
+        self.assertEqual(key, 'trickler_pulse_rate:Hodgdon%20H1000%20%28lot%203%29')
+
+    def test_different_names_never_collide(self):
+        self.assertNotEqual(helpers.profile_key('k', 'a b'), helpers.profile_key('k', 'a%20b'))

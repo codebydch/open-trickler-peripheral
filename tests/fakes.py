@@ -469,23 +469,40 @@ class SimulatedMachine:
 
 
 class FakeMemcache(dict):
-    """Enough of a pymemcache client for the daemons, backed by a plain dict."""
+    """Enough of a pymemcache client for the daemons, backed by a plain dict.
+
+    It checks keys the way pymemcache does -- no whitespace or control characters, at
+    most 250 bytes -- because a profile named "Hodgdon H1000" got through the suite and
+    took the daemon down on the bench.
+    """
 
     def __bool__(self):
         # A real client is always truthy; an empty dict would not be.
         return True
 
+    @staticmethod
+    def check_key(key):
+        encoded = key.encode('utf-8') if isinstance(key, str) else key
+        if not isinstance(encoded, bytes):
+            raise TypeError('memcache keys are strings: %r' % (key,))
+        if len(encoded) > 250:
+            raise ValueError('Key is too long: %r' % key)
+        if any(c < 33 or c == 127 for c in encoded):
+            raise ValueError('Key contains whitespace: %r' % key)
+        return key
+
     def get(self, key, default=None):
-        return dict.get(self, key, default)
+        return dict.get(self, self.check_key(key), default)
 
     def set(self, key, value):
-        self[key] = value
+        self[self.check_key(key)] = value
 
     def set_multi(self, mapping):
-        self.update(mapping)
+        for key, value in mapping.items():
+            self.set(key, value)
 
     def delete(self, key):
-        self.pop(key, None)
+        self.pop(self.check_key(key), None)
 
 
 class FakeLgpio:

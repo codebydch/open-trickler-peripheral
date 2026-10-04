@@ -486,3 +486,24 @@ class CalibratePageTest(AppTestCase):
     def test_the_tuning_page_links_here(self):
         body = self.client.get('/app/config/').get_data(as_text=True)
         self.assertIn('/app/calibrate/', body)
+
+
+class SpacedProfileNameTest(AppTestCase):
+    """The pages scope the learned rate by profile name too, and must not fall over on
+    a name with a space in it any more than the daemon may."""
+
+    def test_status_with_a_spaced_profile(self):
+        self.memcache['active_profile'] = 'Hodgdon H1000'
+        self.memcache[helpers.profile_key('trickler_pulse_rate', 'Hodgdon H1000')] = 0.21
+        status = json.loads(self.client.get('/app/status').get_data(as_text=True))
+        self.assertEqual(status['profile'], 'Hodgdon H1000')
+        self.assertEqual(status['pulse_rate'], 0.21)
+
+    def test_clearing_the_learned_rate_with_a_spaced_profile(self):
+        self.memcache['active_profile'] = 'Hodgdon H1000'
+        key = helpers.profile_key('trickler_pulse_rate', 'Hodgdon H1000')
+        self.memcache[key] = 0.21
+        response = self.client.post('/app/config/update', data={'reset_learned': '1'})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(key, self.memcache)
+        self.assertEqual(self.memcache['trickler_command']['profile'], 'Hodgdon H1000')
