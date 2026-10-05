@@ -212,3 +212,42 @@ class CellTotalsTest(unittest.TestCase):
         self.assertAlmostEqual(summary['mean_total'], 0.03)
         self.assertAlmostEqual(summary['bursts'], 0.25, msg='0.02 + 0.06 is four grains')
         self.assertAlmostEqual(summary['max_dose'], 0.08)
+
+
+class SingleChangeTest(unittest.TestCase):
+    """The variants of the current settings that move one value: the ones a bench run,
+    one change at a time, can actually try next."""
+
+    def test_each_variant_moves_exactly_one_value(self):
+        base = settings(pulse_pwm=30, pulse_fast_pwm=45)
+        variants = list(powder_model.single_changes(base, (25.0, 30.0, 45.0), (0.15, 0.25, 0.4)))
+        self.assertTrue(variants)
+        for name, before, after, changed in variants:
+            moved = [key for key in powder_model.RECOMMENDED_KEYS
+                     if float(getattr(changed, key)) != float(getattr(base, key))]
+            self.assertEqual(moved, [name])
+            self.assertNotEqual(before, after)
+
+    def test_the_fine_speed_never_passes_the_fast_one(self):
+        base = settings(pulse_pwm=30, pulse_fast_pwm=45)
+        for name, _, after, changed in powder_model.single_changes(base, (25.0, 30.0, 45.0, 60.0), (0.4,)):
+            self.assertLessEqual(float(changed.pulse_pwm), float(changed.pulse_fast_pwm), name)
+
+    def test_one_speed_offers_no_fast_until(self):
+        base = settings(pulse_pwm=30, pulse_fast_pwm=30)
+        names = {name for name, *_ in powder_model.single_changes(base, (30.0, 45.0), (0.4,))}
+        self.assertNotIn('pulse_fast_until', names)
+
+    def test_the_recommendation_carries_them_best_first(self):
+        powder = steady_powder({30.0: 1, 45.0: 3})
+        result = powder_model.recommend(
+            powder, settings(pulse_pwm=30, pulse_fast_pwm=45), {30.0: 0.1, 45.0: 0.3}, 0.2,
+            (30.0, 45.0), (0.25, 0.4), first_pass=4, second_pass=8, finalists=3)
+        changes = result['single_changes']
+        self.assertTrue(changes)
+        self.assertTrue(all({'setting', 'from', 'to'} <= set(c['change']) for c in changes))
+        qualifying = [c['meets_limit'] for c in changes]
+        self.assertEqual(qualifying, sorted(qualifying, reverse=True),
+                         'the ones within the limit come first')
+        fast = [c['prediction']['seconds'] for c in changes if c['meets_limit']]
+        self.assertEqual(fast, sorted(fast), 'and among them, the quickest first')

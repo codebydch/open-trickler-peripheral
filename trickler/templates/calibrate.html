@@ -194,7 +194,7 @@
               <tr>
                 <td>{{ '%g'|format(speed|float) }}%</td>
                 <td>{{ '%.3f'|format(rate) }}</td>
-                <td>{% if results.dead_times and speed in results.dead_times %}{{ '%.3f'|format(results.dead_times[speed]) }}{% else %}&mdash;{% endif %}</td>
+                <td>{% if results.dead_times and speed in results.dead_times %}{{ '%.3f'|format(results.dead_times[speed]) }}{% if results.dead_time_sources and results.dead_time_sources.get(speed) == 'kept' %} <small>kept{% if results.dead_times_fitted and results.dead_times_fitted.get(speed) is not none %}; fit {{ '%.2f'|format(results.dead_times_fitted[speed]) }} not credible{% endif %}</small>{% endif %}{% else %}&mdash;{% endif %}</td>
               </tr>
             {% endfor %}
           </table></div>
@@ -282,6 +282,35 @@
             <div class="alarm" id="nothing-to-apply">
               Nothing to apply. {{ recommendation.reason or 'No setting in the grid finished every simulated charge within the heavy limit. Keep the current settings.' }}
             </div>
+          {% endif %}
+
+          {% if recommendation.single_changes %}
+            <h2>Change one thing</h2>
+            <p>Your current settings with one value moved, each simulated the same way,
+              best first. The bench rule is one change per run: pick one, set it on the
+              <a href="/app/config/">tuning page</a>, throw three charges and note the
+              display after each.</p>
+            <div class="scroll"><table id="single-changes">
+              <tr><th>Change</th><th>Seconds</th><th>Heavy</th><th>Light</th><th>Did not finish</th><th>Pulses</th></tr>
+              <tr>
+                <td>None (current settings)</td>
+                <td>{{ '%.1f'|format(recommendation.current.prediction.seconds) }}</td>
+                <td class="{% if recommendation.current.prediction.heavy > recommendation.heavy_limit %}bad{% endif %}">{{ '%.0f'|format(recommendation.current.prediction.heavy * 100) }}%</td>
+                <td>{{ '%.0f'|format(recommendation.current.prediction.light * 100) }}%</td>
+                <td class="{% if recommendation.current.prediction.unfinished > 0 %}bad{% endif %}">{{ '%.0f'|format(recommendation.current.prediction.unfinished * 100) }}%</td>
+                <td>{{ '%.1f'|format(recommendation.current.prediction.pulses) }}</td>
+              </tr>
+              {% for option in recommendation.single_changes[:5] %}
+                <tr class="{% if loop.first and option.meets_limit %}pick{% endif %}">
+                  <td>{{ labels.get(option.change.setting, option.change.setting) }}: {{ '%g'|format(option.change['from']) }} to {{ '%g'|format(option.change['to']) }}</td>
+                  <td>{{ '%.1f'|format(option.prediction.seconds) }}</td>
+                  <td class="{% if option.prediction.heavy > recommendation.heavy_limit %}bad{% endif %}">{{ '%.0f'|format(option.prediction.heavy * 100) }}%</td>
+                  <td>{{ '%.0f'|format(option.prediction.light * 100) }}%</td>
+                  <td class="{% if option.prediction.unfinished > 0 %}bad{% endif %}">{{ '%.0f'|format(option.prediction.unfinished * 100) }}%</td>
+                  <td>{{ '%.1f'|format(option.prediction.pulses) }}</td>
+                </tr>
+              {% endfor %}
+            </table></div>
           {% endif %}
 
           <h2>Does the model fit this machine?</h2>

@@ -443,6 +443,21 @@ class CalibratePageTest(AppTestCase):
         body = self.client.get('/app/calibrate/?profile=Nothing').get_data(as_text=True)
         self.assertIn('nothing to check the prediction against', body)
 
+    def test_single_changes_and_a_kept_spin_up_are_shown(self):
+        results = self.results(dead_time_sources={'30.0': 'kept', '45.0': 'fit'},
+                               dead_times_fitted={'30.0': 0.0, '45.0': 0.12})
+        results['recommendation']['single_changes'] = [{
+            'change': {'setting': 'pulse_pwm', 'from': 30.0, 'to': 25.0},
+            'settings': {}, 'meets_limit': True,
+            'prediction': {'seconds': 11.1, 'heavy': 0.2, 'light': 0.4,
+                           'unfinished': 0.0, 'pulses': 7.0}}]
+        self.status(phase='done', finished=True, results=results)
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('id="single-changes"', body)
+        self.assertIn('Pulse speed: 30 to 25', body)
+        self.assertIn('11.1', body)
+        self.assertIn('kept; fit 0.00 not credible', body)
+
     def test_results_render_from_the_record_when_memcache_has_forgotten(self):
         helpers.write_json(self.learned, {'Varget': {
             'rate': 0.15, 'calibration': self.results(updated='2026-10-03T21:00:00')}})

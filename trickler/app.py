@@ -253,6 +253,7 @@ def render_calibrate(profile=None, notice=None, errors=None):
         current=current,
         measured=measured_charges(profile),
         fields=[labels[name] for name in CALIBRATION_FIELDS],
+        labels={name: setting.label for name, setting in labels.items()},
         capacity='%g' % capacity,
         pulses_per_cell=configured_pulses_per_cell(),
         auto_mode=bool(safe_get(constants.AUTO_MODE.value, False)),
