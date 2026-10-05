@@ -399,6 +399,50 @@ class CalibratePageTest(AppTestCase):
         self.assertIn('value="180"', body, 'the capacity the routine ran with')
         self.assertIn('Discard', body)
 
+    def test_the_page_shows_what_did_not_finish_and_offers_nothing_to_apply(self):
+        """The bench applied a recommendation whose own prediction said 99.7% of charges
+        would not finish; the page had not shown that number, and offered Apply."""
+        results = self.results()
+        results['recommendation']['recommended']['meets_limit'] = False
+        results['recommendation']['recommended']['prediction']['unfinished'] = 0.997
+        results['recommendation']['reason'] = 'No setting in the grid finished every simulated charge.'
+        self.status(phase='done', finished=True, results=results)
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('Did not finish', body)
+        self.assertIn('id="nothing-to-apply"', body)
+        self.assertIn('No setting in the grid finished', body)
+        self.assertNotIn('action="/app/calibrate/apply"', body)
+        self.assertIn('/app/calibrate/dismiss', body, 'the report can still be dismissed')
+
+    def test_a_qualifying_recommendation_is_offered(self):
+        self.status(phase='done', finished=True, results=self.results())
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('action="/app/calibrate/apply"', body)
+        self.assertNotIn('id="nothing-to-apply"', body)
+
+    def test_the_prediction_is_shown_beside_what_the_charges_did(self):
+        charges = os.path.join(self.directory, 'charges.csv')
+        for seconds, landed in (('9.9', '55.00'), ('9.6', '55.02'), ('30.0', '54.98')):
+            helpers.append_charge(charges, {
+                'timestamp': '2026-10-04T23:16:31', 'profile': 'Varget', 'outcome': 'complete',
+                'target': '55.00', 'final': '54.98', 'error': '-0.02', 'unit': 'GRAINS',
+                'pulses': '5', 'seconds': seconds, 'learned_rate': '0.38', 'landed': landed})
+        helpers.append_charge(charges, {
+            'timestamp': '2026-10-04T23:17:00', 'profile': 'Varget', 'outcome': 'empty',
+            'target': '55.00', 'final': '54.40', 'error': '-0.60', 'unit': 'GRAINS',
+            'pulses': '8', 'seconds': '4.9', 'learned_rate': '0.14', 'landed': ''})
+        self.status(phase='done', finished=True, results=self.results())
+        body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
+        self.assertIn('id="measured"', body)
+        self.assertIn('last 3 completed charges', body, 'the empty one is not a charge')
+        self.assertIn('16.5', body, 'mean seconds of the three')
+        self.assertIn('33%', body, 'one of three landed heavy')
+
+    def test_without_charges_the_page_says_there_is_nothing_to_check_against(self):
+        self.status(phase='done', finished=True, results=self.results())
+        body = self.client.get('/app/calibrate/?profile=Nothing').get_data(as_text=True)
+        self.assertIn('nothing to check the prediction against', body)
+
     def test_results_render_from_the_record_when_memcache_has_forgotten(self):
         helpers.write_json(self.learned, {'Varget': {
             'rate': 0.15, 'calibration': self.results(updated='2026-10-03T21:00:00')}})
@@ -486,3 +530,24 @@ class CalibratePageTest(AppTestCase):
     def test_the_tuning_page_links_here(self):
         body = self.client.get('/app/config/').get_data(as_text=True)
         self.assertIn('/app/calibrate/', body)
+
+
+class SpacedProfileNameTest(AppTestCase):
+    """The pages scope the learned rate by profile name too, and must not fall over on
+    a name with a space in it any more than the daemon may."""
+
+    def test_status_with_a_spaced_profile(self):
+        self.memcache['active_profile'] = 'Hodgdon H1000'
+        self.memcache[helpers.profile_key('trickler_pulse_rate', 'Hodgdon H1000')] = 0.21
+        status = json.loads(self.client.get('/app/status').get_data(as_text=True))
+        self.assertEqual(status['profile'], 'Hodgdon H1000')
+        self.assertEqual(status['pulse_rate'], 0.21)
+
+    def test_clearing_the_learned_rate_with_a_spaced_profile(self):
+        self.memcache['active_profile'] = 'Hodgdon H1000'
+        key = helpers.profile_key('trickler_pulse_rate', 'Hodgdon H1000')
+        self.memcache[key] = 0.21
+        response = self.client.post('/app/config/update', data={'reset_learned': '1'})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(key, self.memcache)
+        self.assertEqual(self.memcache['trickler_command']['profile'], 'Hodgdon H1000')

@@ -190,8 +190,9 @@ speeds = 25,30,45
 # Pulse lengths to sweep, seconds. The shortest should clear the motor spin-up; the
 # longest is a sensible cap for a single pulse.
 durations = 0.15,0.25,0.40
-# Pulses per speed-and-length cell. 10 is about two minutes for the grid above; the page
-# lets you choose more when you want tighter numbers.
+# Pulses per speed-and-length cell. 10 is about three minutes for the grid above (each
+# pulse is weighed, then read again a second later for the powder still landing); the
+# page lets you choose more when you want tighter numbers.
 pulses_per_cell = 10
 # How much the container on the pan holds, in grains. The routine pauses for emptying
 # before it gets there. The calibration page writes the last value used back here.

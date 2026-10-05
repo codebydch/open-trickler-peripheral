@@ -297,12 +297,13 @@ class GranularDeliveryTest(unittest.TestCase):
         grain is powder teetering on the lip, not an empty tube."""
         feeder = self.feeder()
         self.feed_window(feeder, [0.02, 0, 0, 0, 0.02, 0, 0])
-        self.assertLess(feeder.empty_pulses, main.MAX_EMPTY_PULSES)
+        self.assertLess(feeder.empty_pulses, main.EMPTY_PULSE_WARNING)
 
-    def test_a_genuinely_empty_hopper_still_gives_up(self):
+    def test_a_long_run_of_empty_pulses_is_counted(self):
+        """Counted for the warning in the log; it no longer ends the charge."""
         feeder = self.feeder()
-        self.feed_window(feeder, [0] * (main.MAX_EMPTY_PULSES + 2))
-        self.assertGreaterEqual(feeder.empty_pulses, main.MAX_EMPTY_PULSES)
+        self.feed_window(feeder, [0] * (main.EMPTY_PULSE_WARNING + 2))
+        self.assertGreaterEqual(feeder.empty_pulses, main.EMPTY_PULSE_WARNING)
 
     def test_the_bench_sequence_does_not_abandon_the_charge(self):
         """Replayed from the log of 2026-09-07 22:14, where the feeder gave up at 0.04 gn
@@ -311,7 +312,7 @@ class GranularDeliveryTest(unittest.TestCase):
         self.feed_window(
             feeder,
             [0, 0.02, 0, 0.02, 0, 0, 0.02, 0, 0, 0, 0, 0, 0.02, 0, 0.02, 0, 0, 0, 0, 0])
-        self.assertLess(feeder.empty_pulses, main.MAX_EMPTY_PULSES,
+        self.assertLess(feeder.empty_pulses, main.EMPTY_PULSE_WARNING,
                         'this is the sequence that used to be read as an empty hopper')
 
     def test_nothing_finer_than_one_grain_can_be_placed(self):
@@ -530,3 +531,75 @@ class PulseLearningTest(unittest.TestCase):
         feeder._learn(0.2, D('-0.04'))
         self.assertEqual(feeder.rate, before)
         self.assertEqual(feeder.empty_pulses, 1)
+
+
+class EmptyPulsesTest(unittest.TestCase):
+    """A run of empty pulses never ends a charge; only the time backstop does.
+
+    It used to end at eight, and the idle loop then began a new charge on the same light
+    pan: thirty in five minutes on the bench, each a fresh history row with the learned
+    window emptied. The owner's call is that the charge keeps pulsing, because the next
+    pulse often delivers.
+    """
+
+    class ScriptedFeeder:
+        """The parts of PulseFeeder that pulse_phase uses, delivering a set script of
+        doses, one pulse a second on its own clock."""
+
+        def __init__(self, scale, doses):
+            self.scale = scale
+            self.doses = list(doses)
+            self.clock = 1000.0
+            self.pulses = 0
+            self.empty_pulses = 0
+            self.rate = 0.2
+            self.min_dose = D('0.02')
+            self.settings = mock.Mock(settle_min_time=0.3)
+
+        def now(self):
+            return self.clock
+
+        def settled_weight(self, min_wait=0.0):
+            return self.scale.weight
+
+        def done(self, remainder):
+            return remainder <= D('0.02')
+
+        def feed(self, remainder):
+            dose = D(str(self.doses.pop(0))) if self.doses else D('0')
+            self.scale.weight += dose
+            self.clock += 1.0
+            self.pulses += 1
+            self.empty_pulses = 0 if dose > 0 else self.empty_pulses + 1
+            return 0.4, dose
+
+    def run_phase(self, doses, start='54.90'):
+        scale = mock.Mock(unit=scales.ANDScale.Units.GRAINS)
+        scale.weight = D(start)
+        feeder = self.ScriptedFeeder(scale, doses)
+        config = fakes.load_config()
+        memcache = fakes.FakeMemcache({'auto_mode': True})
+        outcome = main.pulse_phase(memcache, fakes.constants_for(config), feeder, scale,
+                                   D('55.00'), scales.ANDScale.Units.GRAINS)
+        return outcome, feeder
+
+    def test_the_charge_carries_on_through_a_run_of_empty_pulses(self):
+        """Ten empty pulses, then the powder comes: one charge, finished."""
+        outcome, feeder = self.run_phase([0] * 10 + [0.02, 0.04, 0.02])
+        self.assertEqual(outcome, 'complete')
+        self.assertEqual(feeder.pulses, 13)
+
+    def test_the_run_is_warned_about_once(self):
+        with self.assertLogs(level='WARNING') as logs:
+            self.run_phase([0] * 20 + [0.08])
+        warnings = [line for line in logs.output if 'delivered nothing' in line]
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn('still pulsing', warnings[0])
+
+    def test_powder_that_never_comes_ends_at_the_time_backstop(self):
+        """An empty hopper: the charge pulses until MAX_PULSE_PHASE_SECONDS, then ends
+        'timeout' -- never 'empty', which no longer exists."""
+        outcome, feeder = self.run_phase([])
+        self.assertEqual(outcome, 'timeout')
+        self.assertGreater(feeder.pulses, main.EMPTY_PULSE_WARNING * 10)
+        self.assertGreaterEqual(feeder.clock - 1000.0, main.MAX_PULSE_PHASE_SECONDS)

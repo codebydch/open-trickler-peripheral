@@ -104,7 +104,7 @@ def learned_rate(profile=None, fast=False):
     profile = active_profile() if profile is None else profile
     key = (constants.TRICKLER_FAST_PULSE_RATE.value if fast
            else constants.TRICKLER_PULSE_RATE.value)
-    return safe_get('%s:%s' % (key, profile) if profile else key)
+    return safe_get(helpers.profile_key(key, profile))
 
 
 def history_path():
@@ -186,6 +186,33 @@ def configured_pulses_per_cell():
         return 10
 
 
+def measured_charges(profile, last=20):
+    """What the last completed charges for a profile actually did: the check on the
+    prediction. If the simulator's numbers for the current settings are far from these,
+    the model does not fit this machine, and its recommendation is not worth applying.
+    """
+    rows = helpers.read_charges(history_path()) if history_path() else []
+    rows = [row for row in rows
+            if row.get('outcome') == 'complete' and (row.get('profile') or '') == (profile or '')]
+    rows = rows[-last:]
+    if not rows:
+        return None
+    errors = []
+    for row in rows:
+        try:
+            errors.append(helpers.charge_error(row))
+        except (KeyError, TypeError, ValueError):
+            pass
+    seconds = [float(row['seconds']) for row in rows if row.get('seconds')]
+    pulses = [float(row['pulses']) for row in rows if row.get('pulses')]
+    return {
+        'count': len(rows),
+        'seconds': sum(seconds) / len(seconds) if seconds else None,
+        'pulses': sum(pulses) / len(pulses) if pulses else None,
+        'heavy': (sum(1 for e in errors if e >= 0.02 - 1e-9) / len(errors)) if errors else None,
+    }
+
+
 def render_calibrate(profile=None, notice=None, errors=None):
     """Renders the calibration page for a profile, with the latest results it has."""
     profile = active_profile() if profile is None else profile
@@ -203,9 +230,12 @@ def render_calibrate(profile=None, notice=None, errors=None):
         capacity = float(results['capacity'])
     recommendation = results.get('recommendation') if results else None
     current, _ = current_trickler_settings()
-    proposed = {}
-    if recommendation and isinstance(recommendation.get('recommended'), dict):
-        proposed = dict(recommendation['recommended'].get('settings') or {})
+    recommended = recommendation.get('recommended') if recommendation else None
+    # Only a recommendation that finished every simulated charge within the heavy limit
+    # is offered for applying. The bench applied one that could not finish 99.7% of
+    # them, because the page offered it with a warning paragraph above the button.
+    applicable = bool(recommended and recommended.get('meets_limit'))
+    proposed = dict(recommended.get('settings') or {}) if applicable else {}
     for name in CALIBRATION_FIELDS:
         proposed.setdefault(name, current.get(name))
     labels = {setting.name: setting for setting in helpers.TRICKLER_SETTINGS}
@@ -218,8 +248,10 @@ def render_calibrate(profile=None, notice=None, errors=None):
         results=results,
         results_source=source,
         recommendation=recommendation,
+        applicable=applicable,
         proposed=proposed,
         current=current,
+        measured=measured_charges(profile),
         fields=[labels[name] for name in CALIBRATION_FIELDS],
         capacity='%g' % capacity,
         pulses_per_cell=configured_pulses_per_cell(),
@@ -503,7 +535,7 @@ def update_trickler_config():
         # the copy that survives a reboot, so it is asked to forget that one.
         for key in (constants.TRICKLER_PULSE_RATE.value,
                     constants.TRICKLER_FAST_PULSE_RATE.value):
-            memcache_client.delete('%s:%s' % (key, profile) if profile else key)
+            memcache_client.delete(helpers.profile_key(key, profile))
         memcache_client.set(helpers.command_key(constants),
                             {'command': 'reset_learned', 'profile': profile})
         logging.info('Cleared the learned pulse rates.')

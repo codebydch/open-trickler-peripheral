@@ -18,6 +18,7 @@ import os
 import re
 import struct
 import tempfile
+import urllib.parse
 
 import pymemcache.client.base
 import pymemcache.serde
@@ -449,6 +450,19 @@ def write_json(path, data):
 # forgetting a learned rate today, running a calibration routine in Phase 2 -- goes this
 # way rather than the web app reaching in itself.
 DEFAULT_COMMAND_KEY = 'trickler_command'
+
+
+def profile_key(base, profile):
+    """A memcache key scoped to one powder profile.
+
+    memcache keys may not contain whitespace or control characters, and a profile is
+    named by a person -- "Hodgdon H1000" took the daemon down on its first charge. The
+    name is percent-encoded, which leaves a plain name as it was, so keys written before
+    this existed still match.
+    """
+    if not profile:
+        return base
+    return '%s:%s' % (base, urllib.parse.quote(str(profile), safe=''))
 
 
 DEFAULT_CALIBRATION_STATUS_KEY = 'calibration_status'

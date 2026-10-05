@@ -43,9 +43,10 @@ class EmpiricalPowderTest(unittest.TestCase):
         cells = {(30.0, 0.4): [(0.0, 0.0), (0.0, 0.02), (0.02, 0.0), (0.08, 0.0)]}
         summary = powder_model.EmpiricalPowder(cells).cell_summary()[(30.0, 0.4)]
         self.assertEqual(summary['pulses'], 4)
-        self.assertAlmostEqual(summary['zeros'], 0.5)
+        self.assertAlmostEqual(summary['zeros'], 0.25, msg='the one with only a tail delivered')
         self.assertAlmostEqual(summary['bursts'], 0.25)
         self.assertAlmostEqual(summary['mean_dose'], 0.025)
+        self.assertAlmostEqual(summary['mean_total'], 0.03)
 
     def test_an_empty_record_is_refused(self):
         with self.assertRaises(ValueError):
@@ -164,3 +165,50 @@ class RecommendTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RankingTest(unittest.TestCase):
+    """What the recommender may and may not pick."""
+
+    def recommend(self, powder, rates, **kw):
+        kw.setdefault('first_pass', 8)
+        kw.setdefault('second_pass', 16)
+        kw.setdefault('finalists', 6)
+        return powder_model.recommend(
+            powder, settings(pulse_pwm=30, pulse_fast_pwm=45), rates, continuous_rate=0.2,
+            speeds=(30.0, 45.0), durations=(0.25,), **kw)
+
+    def test_a_setting_that_never_delivers_is_never_recommended(self):
+        """At 30% this powder drops nothing, so every charge at 30 is unfinished and never
+        heavy; the first version ranked the rest by heavy rate and picked exactly that."""
+        powder = steady_powder({30.0: 0, 45.0: 5})
+        result = self.recommend(powder, {30.0: 0.01, 45.0: 0.5})
+        recommended = result['recommended']
+        self.assertEqual(recommended['prediction']['unfinished'], 0.0)
+        self.assertEqual(recommended['settings']['pulse_pwm'], 45.0)
+        self.assertFalse(recommended['meets_limit'], 'five grains a pulse lands heavy')
+        self.assertIn('heavy', result['reason'])
+
+    def test_nothing_finishing_says_so(self):
+        powder = steady_powder({30.0: 0, 45.0: 0})
+        result = self.recommend(powder, {30.0: 0.01, 45.0: 0.01})
+        self.assertFalse(result['recommended']['meets_limit'])
+        self.assertIn('unfinished', result['reason'])
+
+    def test_a_qualifying_setting_has_no_reason_to_give(self):
+        powder = steady_powder({30.0: 1, 45.0: 3})
+        result = self.recommend(powder, {30.0: 0.1, 45.0: 0.3})
+        self.assertTrue(result['recommended']['meets_limit'])
+        self.assertIsNone(result['reason'])
+
+
+class CellTotalsTest(unittest.TestCase):
+
+    def test_the_summary_counts_the_tail_as_delivered(self):
+        cells = {(30.0, 0.4): [(0.0, 0.0), (0.0, 0.02), (0.02, 0.0), (0.02, 0.06)]}
+        summary = powder_model.EmpiricalPowder(cells).cell_summary()[(30.0, 0.4)]
+        self.assertAlmostEqual(summary['zeros'], 0.25, msg='a tail is not nothing')
+        self.assertAlmostEqual(summary['mean_dose'], 0.01)
+        self.assertAlmostEqual(summary['mean_total'], 0.03)
+        self.assertAlmostEqual(summary['bursts'], 0.25, msg='0.02 + 0.06 is four grains')
+        self.assertAlmostEqual(summary['max_dose'], 0.08)

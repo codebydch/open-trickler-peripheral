@@ -131,7 +131,7 @@ class WholeRoutineTest(CalibrationTestCase):
         self.assertTrue(all(r['source'] == 'calibration' and r['profile'] == 'TestPowder'
                             for r in rows))
         self.assertEqual({float(r['pwm']) for r in rows}, {25.0, 30.0, 45.0})
-        self.assertTrue(any(r['tail'] != '' for r in rows), 'the tail is measured on some')
+        self.assertTrue(all(r['tail'] != '' for r in rows), 'the tail is measured on every pulse')
 
     def test_the_results_are_kept_with_the_profile(self):
         machine, scale, measure = self.machine()
@@ -268,3 +268,38 @@ class SettingsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FitTest(CalibrationTestCase):
+    """The fit counts what a pulse delivered in all, tail included.
+
+    On the bench the tails were as large as the doses, and a fit on the doses alone
+    read the feed rate at half, which made every candidate simulate slow."""
+
+    def calibration_with_cells(self, cells):
+        machine, scale, measure = self.machine()
+        self.command()
+        calibration = self.run_passes(machine, scale, measure,
+                                      until=lambda c: c is not None and c.phase == 'sweep')
+        calibration.cells.clear()
+        for key, values in cells.items():
+            calibration.cells[key].extend(values)
+        calibration.records = [{'pwm': k[0], 'on_time': k[1], 'dose': d, 'tail': t}
+                               for k, vals in cells.items() for d, t in vals]
+        calibration.phase = 'fit'
+        with mock.patch.object(time, 'sleep', machine.virtual_sleep()), \
+             mock.patch.object(time, 'time', machine.virtual_clock()):
+            calibration.step()
+        return calibration
+
+    def test_the_rate_includes_the_tails(self):
+        # 0.25 s pulses at 30%: 0.01 by the read and 0.03 in the tail, every time.
+        cells = {(30.0, 0.25): [(0.01, 0.03)] * 10, (30.0, 0.40): [(0.02, 0.04)] * 10,
+                 (25.0, 0.25): [(0.0, 0.0)] * 10, (45.0, 0.25): [(0.04, 0.04)] * 10}
+        calibration = self.calibration_with_cells(cells)
+        rates = calibration.results['rates']
+        # Delivered at 30%: 10 x 0.04 + 10 x 0.06 = 1.0 over the moving time of 20 pulses.
+        dead = calibration.results['dead_times']['30.0']
+        moving = 10 * (0.25 - dead) + 10 * (0.40 - dead)
+        self.assertAlmostEqual(rates['30.0'], 1.0 / moving, places=3)
+        self.assertGreater(rates['30.0'], 0.3 / moving * 1.5, 'the doses alone would read 0.3')
