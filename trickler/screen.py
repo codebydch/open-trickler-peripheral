@@ -151,7 +151,12 @@ class MiniPiTFTApp:
         stood down, so if both are set the jam is the newer news.
         """
         if self.dump_error:
-            return self.colors['RED'], ('MEASURE', 'JAMMED')
+            # The one error key carries two stand-downs: the measure dropping nothing
+            # (a jam) and the tricklers delivering nothing (an empty charge).
+            text = str(self.dump_error).lower()
+            if 'measure' in text or 'jam' in text:
+                return self.colors['RED'], ('MEASURE', 'JAMMED')
+            return self.colors['RED'], ('NO', 'POWDER')
         return self.calibration_band
 
     def band_for_calibration(self, status):

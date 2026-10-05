@@ -246,3 +246,21 @@ class ApplyCalibrationTest(PassTestCase):
         with self.assertLogs(level='WARNING'):
             self.run_passes(machine, scale, measure, count=1)
         self.assertNotIn('trickler_pulse_rate:Varget', self.memcache)
+
+
+class EmptyChargeTest(PassTestCase):
+    """A charge the tricklers cannot feed stands the machine down, like a jam does."""
+
+    def test_an_empty_verdict_switches_auto_mode_off_and_says_why(self):
+        # Powder is never delivered by the tricklers: an empty charge every time.
+        machine, scale, measure = self.machine('45.00', target='45.50')
+        with mock.patch.object(main, 'pulse_phase', return_value='empty'):
+            self.run_passes(machine, scale, measure, count=5)
+        self.assertFalse(self.memcache['auto_mode'])
+        self.assertIn('delivered nothing', self.memcache['dump_error'])
+
+    def test_no_second_charge_starts_on_the_same_pan(self):
+        machine, scale, measure = self.machine('45.00', target='45.50')
+        with mock.patch.object(main, 'pulse_phase', return_value='empty') as phase:
+            self.run_passes(machine, scale, measure, count=5)
+        self.assertEqual(phase.call_count, 1, 'thirty in five minutes was the bench record')

@@ -1160,6 +1160,8 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
         if outcome == 'complete' and settings.landed_wait > 0:
             landed = landed_weight(scale, settings.landed_wait)
             logging.info('Landed: %s %s (complete at %s)', landed, target_unit, final)
+        if outcome == 'empty' and memcache is not None and constants is not None:
+            stand_down(memcache, constants, EMPTY_MESSAGE)
         record_charge(settings, target_weight, final, target_unit,
                       outcome or 'aborted', feeder.pulses, seconds, feeder.rate,
                       landed=landed)
@@ -1250,6 +1252,25 @@ def handle_command(config, memcache, constants, hw, models):
         apply_calibration(config, memcache, constants, hw, models, command)
     else:
         logging.warning('Ignoring a command the trickler does not know: %r', command)
+
+
+EMPTY_MESSAGE = ('%d pulses in a row delivered nothing, so the charge was stopped. Check '
+                 'the hopper and the tube, then switch auto mode on.' % MAX_EMPTY_PULSES)
+
+
+def stand_down(memcache, constants, message):
+    """Stops the machine charging until a person has looked at it.
+
+    The same thing a jammed measure does: auto mode off, and the reason where the
+    control panel, the tuning page and the screen already show it. Switching auto mode
+    back on is how the person says it is dealt with, and clears the message. Before this
+    an `empty` verdict left auto mode on with the pan still light, so the idle loop
+    started another charge on it at once: thirty in five minutes on the bench, each
+    eight fruitless pulses, on settings that could not move the powder.
+    """
+    logging.error(message)
+    memcache.set(constants.DUMP_ERROR.value, message)
+    memcache.set(constants.AUTO_MODE.value, False)
 
 
 def apply_calibration(config, memcache, constants, hw, models, command):

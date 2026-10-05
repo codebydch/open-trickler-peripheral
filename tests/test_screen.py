@@ -334,3 +334,20 @@ class CalibrationBandTest(ScreenTestCase):
         frame = self.display.frame
         row = [frame.getpixel((x, 58)) for x in range(frame.width)]
         self.assertNotIn(self.AMBER, row)
+
+
+@unittest.skipIf(SKIP, 'screen dependencies not available: %s' % SKIP)
+class NoPowderBandTest(ScreenTestCase):
+    """The error key carries two stand-downs: a jammed measure and a charge the
+    tricklers could not feed. The band says which."""
+
+    def test_an_empty_charge_shows_no_powder(self):
+        self.set(self.keys.DUMP_ERROR, '8 pulses in a row delivered nothing, so the charge was stopped.')
+        self.app.refresh()
+        self.assertEqual(self.app.band()[1], ('NO', 'POWDER'))
+        self.assertTrue(self.top_band_is_red())
+
+    def test_a_jam_still_says_so(self):
+        self.set(self.keys.DUMP_ERROR, 'The powder measure dropped nothing in 3 attempt(s)')
+        self.app.refresh()
+        self.assertEqual(self.app.band()[1], ('MEASURE', 'JAMMED'))
