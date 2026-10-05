@@ -25,7 +25,7 @@ what a new session would otherwise get wrong.
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
-.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 372 tests
+.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 385 tests
 ```
 
 No pytest. Use 3.13 -- it's what the Pi runs, and 3.13 has broken this code before when
@@ -183,6 +183,26 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
 - At a 0.3 s settle, one pulse's powder is often credited to the next: `pulses.csv` and
   the learned rate then disagree with the scale display, and the display is right. Check
   the display after a charge before trusting a dose in the record.
+- **The first calibration recommended settings that could not finish a charge**
+  (2026-10-04): 25% / 0.15 s, which is 0.03 s of movement after spin-up -- not strong
+  enough for long enough to move powder out of the tube (the owner's reading; the tube is
+  never empty during a session, so don't reach for "depleted tube" to explain a dead
+  pulse). Two causes, both fixed. The sweep measured the landing tail on every third
+  pulse only and the fit ignored tails altogether, while on this machine the tail is as
+  large as the dose (0.048 vs 0.025 gn at 45%): every speed read at half its delivery and
+  every candidate simulated slow. Now every pulse gets its tail measured (a second each)
+  and the fits count dose + tail. And the recommender, with nothing meeting the heavy
+  limit, fell back to "least heavy", which is the setting that never delivers: its own
+  prediction said 99.7% of charges would not finish, and the page did not show that
+  number. Now a non-finisher is never ranked first, the page shows "Did not finish", and
+  Apply is offered only for a recommendation that finished every simulated charge within
+  the limit. The check that matters is on the page: the simulator's prediction for the
+  *current* settings beside what the history page measured. If they disagree by much,
+  the model is not this machine yet, whatever it recommends.
+- A charge that ends `empty` (eight zero-dose pulses) stands the machine down like a
+  jam: auto mode off, the reason under `DUMP_ERROR`, NO POWDER on the screen. Before
+  that the idle loop restarted on the same light pan at once: thirty charges in five
+  minutes on the bench.
 
 ## Phase 2: learning and adjusting on the fly
 

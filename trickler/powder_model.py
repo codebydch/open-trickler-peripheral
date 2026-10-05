@@ -66,17 +66,24 @@ class EmpiricalPowder:
         return self._rng.choice(self.cells[self.nearest(speed_pct, on_time)])
 
     def cell_summary(self, resolution=D('0.02')):
-        """Per cell: pulses, share empty, mean dose, share of four grains or more, max."""
+        """Per cell: pulses, share that delivered nothing, mean dose by the settle read,
+        mean delivered in all (dose plus tail), share of four grains or more, the most.
+
+        Nothing, bursts and the most are judged on what the pulse delivered in all: a
+        grain that landed after the read still landed, and it is what decides heavy.
+        """
         summary = {}
         for key, values in sorted(self.cells.items()):
             doses = [D(str(dose)) for dose, _ in values]
             tails = [D(str(tail)) for _, tail in values]
+            totals = [dose + tail for dose, tail in zip(doses, tails)]
             summary[key] = {
                 'pulses': len(doses),
-                'zeros': sum(1 for d in doses if d <= 0) / len(doses),
+                'zeros': sum(1 for t in totals if t <= 0) / len(totals),
                 'mean_dose': float(sum(doses) / len(doses)),
-                'bursts': sum(1 for d in doses if d >= resolution * 4) / len(doses),
-                'max_dose': float(max(doses)),
+                'mean_total': float(sum(totals) / len(totals)),
+                'bursts': sum(1 for t in totals if t >= resolution * 4) / len(totals),
+                'max_dose': float(max(totals)),
                 'mean_tail': float(sum(tails) / len(tails)),
             }
         return summary
@@ -301,10 +308,22 @@ def recommend(powder, base, rates, continuous_rate, speeds, durations, heavy_lim
         if progress:
             progress(done / total)
 
+    def qualifies(prediction):
+        return prediction.unfinished == 0 and prediction.heavy <= heavy_limit
+
     def rank(item):
+        """Finishes within the limit, fastest first; then finishes but heavy too often,
+        least heavy first; a setting that does not finish every charge comes last
+        whatever else it does. The first version ranked the rest by heavy rate alone,
+        and the least heavy setting is the one that never delivers anything: on the
+        bench it recommended 25% / 0.15 s, which its own prediction said would not
+        finish 99.7% of charges, and the trickler took minutes to do nothing."""
         settings, prediction = item
-        meets = prediction.heavy <= heavy_limit and prediction.unfinished == 0
-        return (0 if meets else 1, prediction.seconds if meets else prediction.heavy, prediction.heavy)
+        if qualifies(prediction):
+            return (0, prediction.seconds, prediction.heavy)
+        if prediction.unfinished == 0:
+            return (1, prediction.heavy, prediction.seconds)
+        return (2, prediction.unfinished, prediction.seconds)
 
     scored.sort(key=rank)
     refined = []
@@ -326,13 +345,25 @@ def recommend(powder, base, rates, continuous_rate, speeds, durations, heavy_lim
         return {
             'settings': settings_to_dict(settings),
             'prediction': prediction._asdict(),
-            'meets_limit': prediction.heavy <= heavy_limit and prediction.unfinished == 0,
+            'meets_limit': qualifies(prediction),
         }
 
+    best_settings, best_prediction = refined[0]
+    reason = None
+    if not qualifies(best_prediction):
+        if best_prediction.unfinished > 0:
+            reason = ('No setting in the grid finished every simulated charge; the best '
+                      'left %.0f%% unfinished. Keep the current settings.'
+                      % (best_prediction.unfinished * 100))
+        else:
+            reason = ('No setting in the grid kept the heavy rate under %.0f%%; the best '
+                      'was %.0f%%. Keep the current settings, or widen the grid.'
+                      % (heavy_limit * 100, best_prediction.heavy * 100))
     return {
         'heavy_limit': heavy_limit,
         'current': describe(base, current),
-        'recommended': describe(*refined[0]),
+        'recommended': describe(best_settings, best_prediction),
+        'reason': reason,
         'runners_up': [describe(s, p) for s, p in refined[1:4]],
         'evaluated': len(scored),
     }

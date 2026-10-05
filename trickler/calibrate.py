@@ -46,8 +46,11 @@ PRIME_WINDOWS = 3
 STALL_WINDOWS = 3
 # The settle-and-read after a pulse, for the status page's time estimate only.
 READ_SECONDS = 0.15
-# Second reading after a pulse, to measure the landing tail, taken on every nth pulse.
-TAIL_EVERY = 3
+# Second reading after every pulse, a second on, to measure what landed after the settle
+# read: the tail. On the bench (2026-10-04) the tails were as large as the doses -- 0.048
+# gn against 0.025 at 45% -- and measuring them on every third pulse only, with the rest
+# recorded as nothing, under-read the delivery at every speed and made every candidate
+# simulate slow. It costs a second a pulse; the numbers are the point of the routine.
 TAIL_SECONDS = 1.0
 
 RECOMMEND_THREADED = True
@@ -376,15 +379,15 @@ class Calibration:
         self._sleep(self.settings.pulse_off_time)
         dose = main.settled_weight(scale, self.settings.settle_timeout,
                                    self.settings.settle_min_time, clock=self._clock) - before
-        tail = ''
-        if self._index % TAIL_EVERY == 0:
-            self._run_window(TAIL_SECONDS)
-            tail = scale.weight - before - dose
         if dose < 0:
             # Pan knocked or the scale wandered down: not a dose. Count the pulse, learn
             # nothing from it.
             dose = type(dose)('0')
-        self.cells[(speed, duration)].append((float(dose), float(tail) if tail != '' else 0.0))
+        self._run_window(TAIL_SECONDS)
+        tail = scale.weight - before - dose
+        if tail < 0:
+            tail = type(tail)('0')
+        self.cells[(speed, duration)].append((float(dose), float(tail)))
         self.records.append({
             'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
             'pwm': speed,
@@ -425,9 +428,11 @@ class Calibration:
         summary = powder.cell_summary(self._hw.scale.resolution)
         rates, dead_times = {}, {}
         for speed in sorted(self.cal.speeds):
-            rows = [{'pwm': speed, 'on_time': duration, 'dose': dose}
+            # A pulse delivered its dose and its tail: the tail landed after the settle
+            # read, but the pulse put it in the air. The fits count both.
+            rows = [{'pwm': speed, 'on_time': duration, 'dose': dose + tail}
                     for (s, duration), values in self.cells.items() if s == speed
-                    for dose, _ in values]
+                    for dose, tail in values]
             # The spin-up comes from the two-point solve across pulse lengths, when there
             # are enough pulses for the two means to be a line and not two lumps.
             fit = helpers.pulse_fit(rows, min_per_bucket=max(10, self.cal.pulses_per_cell))
@@ -439,8 +444,8 @@ class Calibration:
             # difference of two means can.
             moving = sum(max(duration - dead_time, 0.01) * len(values)
                          for (s, duration), values in self.cells.items() if s == speed)
-            delivered = sum(dose for (s, _d), values in self.cells.items() if s == speed
-                            for dose, _ in values)
+            delivered = sum(dose + tail for (s, _d), values in self.cells.items() if s == speed
+                            for dose, tail in values)
             rates[speed] = max(delivered / max(moving, 1e-6), main.MIN_PULSE_RATE)
         self.results = {
             'profile': self.settings.profile,
@@ -485,7 +490,7 @@ class Calibration:
         recommendation = self._recommendation
         if isinstance(recommendation, Exception):
             raise recommendation
-        if recommendation is not None:
+        if recommendation is not None and recommendation.get('recommended'):
             recommendation['recommended']['settings']['stall_pwm'] = self.stall_pwm
             recommendation['recommended']['settings']['pulse_rate'] = round(
                 self._rates.get(recommendation['recommended']['settings']['pulse_pwm'],

@@ -106,18 +106,27 @@ proposes settings for it:
    measure never runs, so the only powder on the scale is what the trickler drops. The
    routine primes the tube, steps the drive down to find where the motor stalls, then
    fires every combination of the speeds and lengths in `[calibration]` (3 × 3 × 10 pulses
-   by default, about two minutes), weighing each pulse the way a charge does.
+   by default, about three and a half minutes), weighing each pulse the way a charge
+   does and then reading again a second later for the powder still landing.
 3. When the cup is nearly full the routine pauses and the screen shows **EMPTY CUP**: tip
    the powder back into the hopper, put the cup back, press **Continue**.
 4. It then simulates charges against what it measured, through the same final-approach
    code a real charge runs, and shows the fastest settings whose predicted heavy rate is
    no more than one in four, beside what the current settings would do and three
-   runners-up. Edit anything you like, then **Apply**: the values go live for the next
-   charge, are written to the profile (or to `[trickler]` with no name), and the profile's
-   learned feed rates are seeded from the calibration. The results also stay with the
-   profile in `learned.json`, so the page shows them again later.
+   runners-up. Apply is offered only for a recommendation that finished every simulated
+   charge within that limit; otherwise the page says why and the current settings stay.
+   Check the "Does the model fit this machine?" table first: it puts the prediction for
+   the current settings beside what the last charges for the profile actually did. If
+   those disagree by much, the recommendation is not worth trying yet. Edit anything you
+   like, then **Apply**: the values go live for the next charge, are written to the
+   profile (or to `[trickler]` with no name), and the profile's learned feed rates are
+   seeded from the calibration. The results also stay with the profile in
+   `learned.json`, so the page shows them again later.
 5. The prediction is only a prediction. Throw half a dozen charges and look at the
    **Landed** column on the history page; that is what decides whether the settings stay.
+   A charge whose pulses deliver nothing eight times running is stopped, auto mode goes
+   off and the screen says NO POWDER; switch auto mode back on once the hopper and tube
+   have been looked at.
 
 The routine is optional. Tuning by hand — set values on the tuning page, throw charges,
 judge them by what landed — works as it always did, and the calibration page's table is

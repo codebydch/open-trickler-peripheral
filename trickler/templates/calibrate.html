@@ -98,8 +98,8 @@
         powder measure never runs &mdash; and proposes final-approach settings for the
         fastest charge that lands heavy no more than one time in four. It primes the tube,
         finds the speed the motor stalls at, then pulses at every speed and length in the
-        <code>[calibration]</code> grid, weighing each pulse. About three minutes with the
-        shipped grid. Put an empty cup on the pan and keep the hopper topped up.
+        <code>[calibration]</code> grid, weighing each pulse and reading again a second
+        later for what is still landing. About four minutes with the shipped grid. Put an empty cup on the pan and keep the hopper topped up.
       </p>
 
       {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
@@ -164,8 +164,8 @@
         </div>
         <div class="field">
           <label for="pulses_per_cell">Pulses per cell</label>
-          <p>Per speed-and-length combination. 10 is about two minutes of pulsing with the
-            shipped grid; more gives tighter numbers and takes proportionally longer.</p>
+          <p>Per speed-and-length combination. 10 is about three minutes of pulsing with
+            the shipped grid; more gives tighter numbers and takes proportionally longer.</p>
           <input type="number" id="pulses_per_cell" name="pulses_per_cell"
                  value="{{ pulses_per_cell }}" min="3" max="50" step="1" required>
           {% if errors.get('pulses_per_cell') %}<p class="error">{{ errors['pulses_per_cell'] }}</p>{% endif %}
@@ -202,11 +202,13 @@
 
         {% if results.cells %}
           <h2>What a pulse drops</h2>
-          <p>Per speed and length: how often a pulse dropped nothing, the mean dose, how
-            often it dropped four grains or more (0.08 gn), and the most it dropped. The
-            tail is what landed in the second after the reading was taken.</p>
+          <p>Per speed and length: how often a pulse delivered nothing, what had landed by
+            the settle reading, the tail that landed in the second after it, the total,
+            how often a pulse delivered four grains or more (0.08 gn), and the most one
+            delivered. Heavy is decided by the total; the feeder only sees the first
+            column when it decides the next pulse.</p>
           <div class="scroll"><table id="cells">
-            <tr><th>Speed</th><th>Length</th><th>Pulses</th><th>Nothing</th><th>Mean</th><th>&ge;4 grains</th><th>Max</th><th>Tail</th></tr>
+            <tr><th>Speed</th><th>Length</th><th>Pulses</th><th>Nothing</th><th>By read</th><th>Tail</th><th>Total</th><th>&ge;4 grains</th><th>Max</th></tr>
             {% for cell in results.cells|sort(attribute='on_time')|sort(attribute='speed') %}
               <tr>
                 <td>{{ '%g'|format(cell.speed) }}%</td>
@@ -214,9 +216,10 @@
                 <td>{{ cell.pulses }}</td>
                 <td>{{ '%.0f'|format(cell.zeros * 100) }}%</td>
                 <td>{{ '%.3f'|format(cell.mean_dose) }}</td>
+                <td>{{ '%.3f'|format(cell.mean_tail) }}</td>
+                <td><strong>{{ '%.3f'|format(cell.mean_total if cell.mean_total is defined else cell.mean_dose + cell.mean_tail) }}</strong></td>
                 <td class="{% if cell.bursts > 0.25 %}bad{% endif %}">{{ '%.0f'|format(cell.bursts * 100) }}%</td>
                 <td>{{ '%.2f'|format(cell.max_dose) }}</td>
-                <td>{{ '%.3f'|format(cell.mean_tail) }}</td>
               </tr>
             {% endfor %}
           </table></div>
@@ -263,22 +266,58 @@
               {% for other in recommendation.runners_up %}<td>{{ '%.0f'|format(other.prediction.light * 100) }}%</td>{% endfor %}
             </tr>
             <tr>
+              <td>Did not finish</td>
+              <td class="{% if recommendation.current.prediction.unfinished > 0 %}bad{% endif %}">{{ '%.0f'|format(recommendation.current.prediction.unfinished * 100) }}%</td>
+              <td class="{% if recommendation.recommended.prediction.unfinished > 0 %}bad{% endif %}"><strong>{{ '%.0f'|format(recommendation.recommended.prediction.unfinished * 100) }}%</strong></td>
+              {% for other in recommendation.runners_up %}<td class="{% if other.prediction.unfinished > 0 %}bad{% endif %}">{{ '%.0f'|format(other.prediction.unfinished * 100) }}%</td>{% endfor %}
+            </tr>
+            <tr>
               <td>Pulses per charge</td>
               <td>{{ '%.1f'|format(recommendation.current.prediction.pulses) }}</td>
               <td><strong>{{ '%.1f'|format(recommendation.recommended.prediction.pulses) }}</strong></td>
               {% for other in recommendation.runners_up %}<td>{{ '%.1f'|format(other.prediction.pulses) }}</td>{% endfor %}
             </tr>
           </table></div>
-          {% if not recommendation.recommended.meets_limit %}
-            <div class="warn">No setting in the grid met the heavy limit in simulation; the
-              one shown is the least bad. Widen the grid in <code>[calibration]</code>, or
-              tune by hand.</div>
+          {% if not applicable %}
+            <div class="alarm" id="nothing-to-apply">
+              Nothing to apply. {{ recommendation.reason or 'No setting in the grid finished every simulated charge within the heavy limit. Keep the current settings.' }}
+            </div>
+          {% endif %}
+
+          <h2>Does the model fit this machine?</h2>
+          {% if measured %}
+            <p id="measured">The simulator's prediction for the <strong>current</strong>
+              settings against the last {{ measured.count }} completed charge{{ 's' if measured.count != 1 }}
+              for this profile on the history page. If these disagree by much, the model
+              is not this machine yet, and the recommendation is not worth applying.</p>
+            <div class="scroll"><table>
+              <tr><th></th><th>Predicted</th><th>Measured</th></tr>
+              <tr>
+                <td>Seconds per charge (final approach)</td>
+                <td>{{ '%.1f'|format(recommendation.current.prediction.seconds) }}</td>
+                <td>{% if measured.seconds is not none %}{{ '%.1f'|format(measured.seconds) }}{% else %}&mdash;{% endif %}</td>
+              </tr>
+              <tr>
+                <td>Heavy</td>
+                <td>{{ '%.0f'|format(recommendation.current.prediction.heavy * 100) }}%</td>
+                <td>{% if measured.heavy is not none %}{{ '%.0f'|format(measured.heavy * 100) }}%{% else %}&mdash;{% endif %}</td>
+              </tr>
+              <tr>
+                <td>Pulses per charge</td>
+                <td>{{ '%.1f'|format(recommendation.current.prediction.pulses) }}</td>
+                <td>{% if measured.pulses is not none %}{{ '%.1f'|format(measured.pulses) }}{% else %}&mdash;{% endif %}</td>
+              </tr>
+            </table></div>
+          {% else %}
+            <p id="measured">No completed charges recorded for this profile yet, so there
+              is nothing to check the prediction against. Throw a few at the current
+              settings first; the history page keeps what landed.</p>
           {% endif %}
         {% endif %}
 
+        {% if applicable %}
         <h2>Apply</h2>
-        <p>The values below are the recommendation{% if not recommendation %} &mdash; none yet, so
-          these are the settings in force{% endif %}. Edit any of them before applying.
+        <p>The values below are the recommendation. Edit any of them before applying.
           Apply puts them in force for the next charge and writes them to the named
           profile (or to <code>[trickler]</code> with no name), and seeds the profile's
           learned feed rates from the calibration at those speeds.</p>
@@ -306,6 +345,11 @@
             {% endif %}
           </div>
         </form>
+        {% elif results_source == 'status' %}
+          <form method="post" action="/app/calibrate/dismiss" class="actions">
+            <button type="submit" class="secondary">Dismiss</button>
+          </form>
+        {% endif %}
       {% elif not running %}
         <p>No calibration for {{ profile or 'the plain [trickler] settings' }} yet.</p>
       {% endif %}
