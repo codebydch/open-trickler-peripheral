@@ -48,9 +48,13 @@ PULSE_RATE_LEARN = 0.4
 # it to zero and break the on-time calculation.
 MIN_PULSE_RATE = 0.02
 
-# Give up on a charge after this many pulses in a row deliver nothing measurable. That
-# means an empty hopper or a jammed tube, not something more trickling will fix.
-MAX_EMPTY_PULSES = 8
+# A run of this many pulses in a row delivering nothing gets a warning in the log, once
+# per run. It no longer ends the charge. It used to, and then the idle loop started a new
+# charge on the same light pan: a fresh history row, the learned-rate window emptied, the
+# first pulse a probe again -- thirty times in five minutes on the bench (2026-10-04).
+# The owner's call: a charge keeps pulsing through empty pulses, because the next one
+# often delivers. MAX_PULSE_PHASE_SECONDS below is what stops a charge that never will.
+EMPTY_PULSE_WARNING = 8
 
 # The first pulse at a speed nothing has been measured at runs for this many of the
 # shortest pulses the machine can place, and is also held to this fraction of what the
@@ -74,8 +78,9 @@ PULSE_RATE_WINDOW = 6
 # over, while 3 and 8 both produced charges that did.
 FINAL_GRAINS = 5
 
-# Backstop on the final approach. Even with the give-up counters above, a pathological
-# cycle should not wedge the daemon on one charge.
+# The one stop on a final approach that is not finishing: after this long the charge
+# ends 'timeout', and with auto mode still on the next pass starts again. An empty hopper
+# or a blocked tube ends up here, two minutes in.
 MAX_PULSE_PHASE_SECONDS = 120.0
 
 # The idle loop logs its state when it changes, but no more often than this. Lifting and
@@ -996,12 +1001,12 @@ def pulse_phase(memcache, constants, feeder, scale, target_weight, target_unit):
                 weight, scale.unit, remainder, feeder.min_dose)
             return 'complete'
 
-        if feeder.empty_pulses >= MAX_EMPTY_PULSES:
+        if feeder.empty_pulses == EMPTY_PULSE_WARNING:
+            # Said once per run of empty pulses, and the charge carries on.
             logging.warning(
-                '%s pulses in a row delivered nothing, stopping. Check the hopper and '
-                'tube. remainder: %s %s',
+                '%s pulses in a row delivered nothing; still pulsing. If this keeps up, '
+                'check the hopper and tube. remainder: %s %s',
                 feeder.empty_pulses, remainder, target_unit)
-            return 'empty'
 
         on_time, dose = feeder.feed(remainder)
         weight = scale.weight

@@ -229,8 +229,6 @@ class ChargeSimulator:
             if feeder.done(remainder):
                 finished = True
                 break
-            if feeder.empty_pulses >= main.MAX_EMPTY_PULSES:
-                break
             feeder.feed(remainder)
             weight = pan.weight
             clock.advance(READ_SECONDS)

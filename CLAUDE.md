@@ -25,7 +25,7 @@ what a new session would otherwise get wrong.
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
-.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 385 tests
+.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 384 tests
 ```
 
 No pytest. Use 3.13 -- it's what the Pi runs, and 3.13 has broken this code before when
@@ -199,10 +199,15 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   the limit. The check that matters is on the page: the simulator's prediction for the
   *current* settings beside what the history page measured. If they disagree by much,
   the model is not this machine yet, whatever it recommends.
-- A charge that ends `empty` (eight zero-dose pulses) stands the machine down like a
-  jam: auto mode off, the reason under `DUMP_ERROR`, NO POWDER on the screen. Before
-  that the idle loop restarted on the same light pan at once: thirty charges in five
-  minutes on the bench.
+- **A run of empty pulses never ends a charge -- the owner's call (2026-10-05).** Eight
+  zero-dose pulses in a row used to end it `empty`, and the idle loop then started a new
+  charge on the same light pan: thirty in five minutes on 2026-10-04, each a fresh
+  history row with the learned window emptied and the first pulse a probe again. A
+  stand-down (auto mode off, like a jam) was tried and dropped: the next pulse often
+  delivers, and the owner would rather it kept going. Now the charge keeps pulsing,
+  `EMPTY_PULSE_WARNING` puts one line in the log per run of eight, and the only stop is
+  `MAX_PULSE_PHASE_SECONDS` (120 s, outcome `timeout`), which is where an empty hopper
+  ends up. Old `charges.csv` rows can still say `empty`.
 
 ## Phase 2: learning and adjusting on the fly
 

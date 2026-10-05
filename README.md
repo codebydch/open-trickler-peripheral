@@ -124,9 +124,6 @@ proposes settings for it:
    `learned.json`, so the page shows them again later.
 5. The prediction is only a prediction. Throw half a dozen charges and look at the
    **Landed** column on the history page; that is what decides whether the settings stay.
-   A charge whose pulses deliver nothing eight times running is stopped, auto mode goes
-   off and the screen says NO POWDER; switch auto mode back on once the hopper and tube
-   have been looked at.
 
 The routine is optional. Tuning by hand — set values on the tuning page, throw charges,
 judge them by what landed — works as it always did, and the calibration page's table is
