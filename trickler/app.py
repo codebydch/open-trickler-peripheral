@@ -200,14 +200,23 @@ def configured_pulses_per_cell():
         return 10
 
 
-def measured_charges(profile, last=20):
+def measured_charges(profile, settings=None, last=20):
     """What the last completed charges for a profile actually did: the check on the
     prediction. If the simulator's numbers for the current settings are far from these,
     the model does not fit this machine, and its recommendation is not worth applying.
+
+    With `settings`, only charges recorded as thrown at exactly those settings count.
+    The first version took every charge for the profile; on 2026-10-16 that was six
+    charges over twelve days, at settings the profile no longer held, and the check
+    failed for reasons that had nothing to do with the model. Charges recorded before
+    charges carried their settings never match. `seconds` is the final approach
+    alone (`pulse_seconds`), which is what the simulator predicts on its own.
     """
     rows = helpers.read_charges(history_path()) if history_path() else []
     rows = [row for row in rows
             if row.get('outcome') == 'complete' and (row.get('profile') or '') == (profile or '')]
+    if settings:
+        rows = [row for row in rows if thrown_at(row, settings)]
     rows = rows[-last:]
     if not rows:
         return None
@@ -217,7 +226,7 @@ def measured_charges(profile, last=20):
             errors.append(helpers.charge_error(row))
         except (KeyError, TypeError, ValueError):
             pass
-    seconds = [float(row['seconds']) for row in rows if row.get('seconds')]
+    seconds = [float(row['pulse_seconds']) for row in rows if row.get('pulse_seconds')]
     pulses = [float(row['pulses']) for row in rows if row.get('pulses')]
     return {
         'count': len(rows),
@@ -225,6 +234,34 @@ def measured_charges(profile, last=20):
         'pulses': sum(pulses) / len(pulses) if pulses else None,
         'heavy': (sum(1 for e in errors if e >= 0.02 - 1e-9) / len(errors)) if errors else None,
     }
+
+
+def thrown_at(row, settings):
+    """Whether a recorded charge was thrown at these settings, every one of them."""
+    for name, value in settings.items():
+        recorded = row.get(name)
+        if not recorded:
+            return False
+        try:
+            if abs(float(recorded) - float(value)) > 1e-6:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def simulated_settings(results):
+    """The settings a calibration simulated as current, and read its sweep at: what a
+    charge must have been thrown at to check the prediction against. None without a
+    recommendation."""
+    recommendation = results.get('recommendation') if results else None
+    current = (recommendation or {}).get('current') or {}
+    if not current.get('settings'):
+        return None
+    settings = dict(current['settings'])
+    if results.get('settle_min_time') is not None:
+        settings['settle_min_time'] = results['settle_min_time']
+    return settings
 
 
 def render_calibrate(profile=None, notice=None, errors=None):
@@ -265,7 +302,7 @@ def render_calibrate(profile=None, notice=None, errors=None):
         applicable=applicable,
         proposed=proposed,
         current=current,
-        measured=measured_charges(profile),
+        measured=measured_charges(profile, simulated_settings(results)),
         fields=[labels[name] for name in CALIBRATION_FIELDS],
         labels={name: setting.label for name, setting in labels.items()},
         capacity='%g' % capacity,
@@ -423,29 +460,29 @@ def calibrate_apply():
     problem = helpers.profile_name_problem(name) if name else None
     if problem:
         return back_to_calibrate(active_profile(), 'Not applied. ' + problem)
-    # Select first: switching profile drops the live overrides, and the ones set below
-    # are the values being applied.
+    # Select first: a switch drops live values left from the other profile, so they
+    # cannot fill in the settings this form does not send.
     selected = select_profile(name)
     current, _ = current_trickler_settings(name)
     submitted = {key: request.form[key] for key in CALIBRATION_FIELDS if key in request.form}
     values, errors = helpers.clean_trickler_settings(submitted, current)
-    set_memcache_value(constants.TRICKLER_SETTINGS.value, values)
 
     section = helpers.profile_section(name) if name else 'trickler'
     notice = 'Applied. The next charge uses these values'
-    try:
-        helpers.update_ini_section(args.config_file, section, values)
-        config.read(args.config_file)
-        notice += ', saved to [%s].' % section
-    except OSError as exc:
-        logging.warning('Could not write %s: %s', args.config_file, exc)
+    problem = save_settings(section, values)
+    if problem:
         notice += ', but %s could not be written (%s), so they will be lost on restart.' % (
-            args.config_file, exc)
+            args.config_file, problem)
+    else:
+        notice += ', saved to [%s].' % section
     notice += selected
     send_command('calibrate_apply', profile=name,
                  pulse_pwm=float(values['pulse_pwm']), pulse_fast_pwm=float(values['pulse_fast_pwm']))
     if errors:
-        notice += ' Some values were adjusted: ' + ' '.join(errors.values())
+        # The only report of an adjusted value: this form has no per-field errors.
+        labels = {setting.name: setting.label for setting in helpers.TRICKLER_SETTINGS}
+        notice += ' Some values were adjusted: ' + ' '.join(
+            '%s %s.' % (labels[key], message) for key, message in errors.items())
     return back_to_calibrate(name, notice)
 
 
@@ -546,9 +583,14 @@ def update_profile():
         note = select_profile(name)
         # The section now holds exactly what the overrides held.
         memcache_client.delete(constants.TRICKLER_SETTINGS.value)
-        return render_config(
-            notice='Saved %s, including a learned feed rate of %s.%s'
-                   % (name, values.get('pulse_rate', 'the configured default'), note))
+        # Said as what it is. It used to say "including a learned feed rate of" whatever
+        # the starting rate was, learned or not, and a new profile gets the rate only as
+        # its starting guess: its own learned rate starts empty.
+        notice = 'Saved %s.' % name
+        if rate:
+            notice += ' Starting feed rate set to %s /s, the rate learned so far.' % (
+                values['pulse_rate'])
+        return render_config(notice=notice + note)
 
     if 'delete' in request.form:
         return delete_profile(selected)
@@ -619,20 +661,36 @@ def update_trickler_config():
 
     current, _ = current_trickler_settings()
     values, errors = helpers.clean_trickler_settings(request.form, current)
-    set_memcache_value(constants.TRICKLER_SETTINGS.value, values)
-
-    # Saved where the trickler will read it after a reboot: the selected profile's
-    # section, since that section hides [trickler] from it.
+    # Saved to the selected profile's section, since that section hides [trickler] from
+    # the trickler, and the trickler follows the file: the next charge uses it.
     section = settings_section()
     notice = 'Applied. The next charge will use these values, saved to [%s].' % section
+    problem = save_settings(section, values)
+    if problem:
+        notice = ('Applied for now, but %s could not be written (%s), so these values '
+                  'will be lost on restart.' % (args.config_file, problem))
+    return render_config(errors=errors, notice=notice)
+
+
+def save_settings(section, values):
+    """Writes tuning values to a section of the config file. Returns None, or the
+    error if the file could not be written.
+
+    The trickler follows the file, so a saved value needs nothing else. Live overrides
+    are only the fallback when the file cannot be written: Apply used to set them every
+    time as well, so the page warned of live values after every Apply, and values set
+    that way could outlive what was saved -- for twelve days before the bench of
+    2026-10-16 they hid a profile's real contents. A successful save drops any left over.
+    """
     try:
         helpers.update_ini_section(args.config_file, section, values)
         config.read(args.config_file)
     except OSError as exc:
         logging.warning('Could not write %s: %s', args.config_file, exc)
-        notice = ('Applied for now, but %s could not be written (%s), so these values '
-                  'will be lost on restart.' % (args.config_file, exc))
-    return render_config(errors=errors, notice=notice)
+        set_memcache_value(constants.TRICKLER_SETTINGS.value, values)
+        return exc
+    memcache_client.delete(constants.TRICKLER_SETTINGS.value)
+    return None
 
 
 @app.route('/app/status')

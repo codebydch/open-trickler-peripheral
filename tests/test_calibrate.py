@@ -133,13 +133,18 @@ class WholeRoutineTest(CalibrationTestCase):
         self.assertEqual({float(r['pwm']) for r in rows}, {25.0, 30.0, 45.0})
         self.assertTrue(all(r['tail'] != '' for r in rows), 'the tail is measured on every pulse')
 
-    def test_the_results_are_kept_with_the_profile(self):
+    def test_the_results_are_kept_with_the_profile_and_the_learned_rates_left_alone(self):
+        """Bench, 2026-10-16: a calibration nobody applied replaced the rates the charges
+        had learned with its fit, in the file only. The rates are the model's; Apply
+        seeds them."""
+        path = os.path.join(self.directory, 'learned.json')
+        helpers.write_json(path, {'TestPowder': {'rate': 0.0968, 'fast_rate': 0.3455}})
         machine, scale, measure = self.machine()
         self.command()
         self.run_passes(machine, scale, measure)
-        learned = helpers.read_json(os.path.join(self.directory, 'learned.json'))
-        self.assertIn('calibration', learned['TestPowder'])
-        self.assertIn('rate', learned['TestPowder'], 'the fitted rate seeds the next charge')
+        learned = helpers.read_json(path)['TestPowder']
+        self.assertIn('calibration', learned)
+        self.assertEqual((learned['rate'], learned['fast_rate']), (0.0968, 0.3455))
 
     def test_the_sweep_sees_the_lumps(self):
         """The point of calibrating on this simulator: cells differ by speed, and the

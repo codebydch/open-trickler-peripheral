@@ -476,6 +476,9 @@ class Calibration:
             'dead_time_sources': {str(speed): source
                                   for speed, source in dead_time_sources.items()},
             'pulses': len(self.records),
+            # Not one of the settings the recommendation moves, but the check against real
+            # charges compares only charges thrown at the settle the sweep was read at.
+            'settle_min_time': float(self.settings.settle_min_time),
             'recommendation': None,
         }
         self._powder, self._rates = powder, rates
@@ -525,7 +528,14 @@ class Calibration:
         self.finished = True
 
     def _store(self):
-        """Keeps the results with the profile's learned state, and seeds its rates."""
+        """Keeps the results with the profile's learned state.
+
+        Only the `calibration` block: the rates in the entry belong to the profile's
+        FeedModel. This used to write the fitted rates there as well, behind the model's
+        back -- a calibration nobody applied changed the stored rate, and the next reboot
+        loaded the fit in place of what the charges had learned. Apply seeds the rates,
+        through the model (main.apply_calibration).
+        """
         path = self.settings.learned_path
         if not path:
             return
@@ -535,12 +545,6 @@ class Calibration:
             if not isinstance(entry, dict):
                 entry = {}
             entry['calibration'] = dict(self.results, updated=datetime.datetime.now().isoformat(timespec='seconds'))
-            fine = self._rates.get(self.settings.pulse_pwm)
-            fast = self._rates.get(self.settings.pulse_fast_pwm)
-            if fine:
-                entry['rate'] = fine
-            if fast and self.settings.pulse_fast_pwm > self.settings.pulse_pwm:
-                entry['fast_rate'] = fast
             data[self.settings.profile] = entry
             helpers.write_json(path, data)
         except OSError:

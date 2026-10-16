@@ -263,6 +263,22 @@ class RecordingTest(TempPathTest):
         self.assertGreater(int(row['pulses']), 0)
         self.assertEqual(row['unit'], 'GRAINS')
 
+    def test_a_charge_carries_its_settings_and_its_final_approach_time(self):
+        """What a calibration's prediction is checked against: charges thrown at the
+        settings it simulated, timed over the part it simulates."""
+        machine = fakes.SimulatedMachine('44.50')
+        config = fakes.load_config(history_path=self.path, pulse_pwm=30, pulse_fast_pwm=45,
+                                   pulse_trickle_weight=0.5, settle_min_time=0.3)
+        run_charge(machine, D('45.00'), config=config)
+        row = helpers.read_charges(self.path)[0]
+        self.assertEqual((row['pulse_pwm'], row['pulse_fast_pwm'], row['pulse_trickle_weight'],
+                          row['settle_min_time']), ('30', '45', '0.5', '0.3'))
+        for name in helpers.CHARGE_SETTINGS:
+            self.assertNotEqual(row[name], '', name)
+        self.assertGreater(float(row['pulse_seconds']), 0)
+        self.assertLessEqual(float(row['pulse_seconds']), float(row['seconds']),
+                             'the final approach is part of the trickle')
+
     def test_an_aborted_charge_records_the_abort(self):
         machine = fakes.SimulatedMachine('44.50')
         run_charge(machine, D('45.00'),

@@ -195,7 +195,7 @@
               <tr>
                 <td>{{ '%g'|format(speed|float) }}%</td>
                 <td>{{ '%.3f'|format(rate) }}</td>
-                <td>{% if results.dead_times and speed in results.dead_times %}{{ '%.3f'|format(results.dead_times[speed]) }}{% if results.dead_time_sources and results.dead_time_sources.get(speed) == 'kept' %} <small>kept{% if results.dead_times_fitted and results.dead_times_fitted.get(speed) is not none %}; fit {{ '%.2f'|format(results.dead_times_fitted[speed]) }} not credible{% endif %}</small>{% endif %}{% else %}&mdash;{% endif %}</td>
+                <td>{% if results.dead_times and speed in results.dead_times %}{{ '%.3f'|format(results.dead_times[speed]) }}{% if results.dead_time_sources and results.dead_time_sources.get(speed) == 'kept' %} <small>kept{% if results.dead_times_fitted and results.dead_times_fitted.get(speed) is not none %}; fit {{ '%.2f'|format(results.dead_times_fitted[speed]) }} not credible{% else %}; no fit: too few pulses per length, or the longer ones did not drop more{% endif %}</small>{% endif %}{% else %}&mdash;{% endif %}</td>
               </tr>
             {% endfor %}
           </table></div>
@@ -317,14 +317,15 @@
           <h2>Does the model fit this machine?</h2>
           {% if measured %}
             <p id="measured">The simulator's prediction for the <strong>current</strong>
-              settings against the last {{ measured.count }} completed charge{{ 's' if measured.count != 1 }}
-              for this profile on the history page. If these disagree by much, the model
-              is not this machine yet, and the recommendation is not worth applying.</p>
+              settings (the Current column above) against the last {{ measured.count }}
+              completed charge{{ 's' if measured.count != 1 }} for this profile thrown at
+              exactly those settings. If these disagree by much, the model is not this
+              machine yet, and the recommendation is not worth applying.</p>
             <div class="scroll"><table>
               <tr><th></th><th>Predicted</th><th>Measured</th></tr>
               <tr>
-                <td>Seconds per charge (final approach)</td>
-                <td>{{ '%.1f'|format(recommendation.current.prediction.seconds) }}</td>
+                <td>Seconds in the final approach</td>
+                <td>{% if recommendation.current.prediction.pulse_seconds is defined and recommendation.current.prediction.pulse_seconds is not none %}{{ '%.1f'|format(recommendation.current.prediction.pulse_seconds) }}{% else %}&mdash;{% endif %}</td>
                 <td>{% if measured.seconds is not none %}{{ '%.1f'|format(measured.seconds) }}{% else %}&mdash;{% endif %}</td>
               </tr>
               <tr>
@@ -339,9 +340,11 @@
               </tr>
             </table></div>
           {% else %}
-            <p id="measured">No completed charges recorded for this profile yet, so there
-              is nothing to check the prediction against. Throw a few at the current
-              settings first; the history page keeps what landed.</p>
+            <p id="measured">No completed charges recorded for this profile at the settings
+              in the Current column, so there is nothing to check the prediction against.
+              Throw three at exactly those settings and reload this page: the check needs
+              no new calibration. Charges recorded before charges carried their settings
+              do not count.</p>
           {% endif %}
         {% endif %}
 
@@ -351,7 +354,10 @@
           Apply puts them in force for the next charge and writes them to the named
           profile (or to <code>[trickler]</code> with no name), and seeds the profile's
           learned feed rates from the calibration at those speeds.</p>
-        <form method="post" action="/app/calibrate/apply" class="proposed">
+        {# novalidate: the fitted rate and spin-up come to four decimals, finer than their
+           fields' steps, and the browser would refuse to submit them. The server checks
+           every value and the notice says what it adjusted. #}
+        <form method="post" action="/app/calibrate/apply" class="proposed" novalidate>
           <div class="scroll"><table>
             <tr><th>Setting</th><th>Current</th><th>Apply</th></tr>
             {% for field in fields %}
@@ -371,7 +377,7 @@
           <div class="actions">
             <button type="submit">Apply</button>
             {% if results_source == 'status' %}
-              <button type="submit" formaction="/app/calibrate/dismiss" formnovalidate class="secondary">Discard</button>
+              <button type="submit" formaction="/app/calibrate/dismiss" class="secondary">Discard</button>
             {% endif %}
           </div>
         </form>

@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import helpers
 
@@ -58,22 +59,44 @@ class TuningPageTest(AppTestCase):
         for setting in helpers.TRICKLER_SETTINGS:
             self.assertIn('name="%s"' % setting.name, body)
 
-    def test_post_applies_live_and_persists(self):
-        form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
-        form['pulse_min_on_time'] = '0.02'
-        self.client.post('/app/config/update', data=form)
-
-        self.assertEqual(self.memcache['trickler_settings']['pulse_min_on_time'], '0.02')
+    def read_ini(self):
         config = configparser.ConfigParser()
         config.optionxform = str
         config.read(self.ini)
-        self.assertEqual(config['trickler']['pulse_min_on_time'], '0.02')
+        return config
+
+    def test_post_saves_to_the_file_and_sets_no_live_values(self):
+        """The trickler follows the file. Apply used to set live values as well, so the
+        page warned of them after every Apply, and they could outlive what was saved."""
+        form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
+        form['pulse_min_on_time'] = '0.02'
+        body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
+        self.assertEqual(self.read_ini()['trickler']['pulse_min_on_time'], '0.02')
+        self.assertNotIn('trickler_settings', self.memcache)
+        self.assertNotIn('live ones', body)
+        self.assertIn('value="0.02"', body)
+
+    def test_post_drops_live_values_left_over(self):
+        self.memcache['trickler_settings'] = {'pulse_pwm': '99'}
+        form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
+        self.client.post('/app/config/update', data=form)
+        self.assertNotIn('trickler_settings', self.memcache)
+
+    def test_a_file_that_cannot_be_written_falls_back_to_live_values(self):
+        form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
+        form['pulse_pwm'] = '33'
+        with mock.patch.object(helpers, 'update_ini_section',
+                               side_effect=PermissionError('read-only')):
+            body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
+        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '33')
+        self.assertIn('could not be written (read-only)', body)
+        self.assertIn('live ones', body)
 
     def test_post_clamps_and_says_so(self):
         form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
         form['pulse_pwm'] = '999'
         body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
-        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '100')
+        self.assertEqual(self.read_ini()['trickler']['pulse_pwm'], '100')
         self.assertIn('clamped', body)
 
     def test_saving_keeps_the_config_comments(self):
@@ -167,6 +190,18 @@ class HistoryPageTest(AppTestCase):
         self.assertIn('+0.040', body, 'the error shown is against what landed')
         self.assertIn('Landed heavy', body)
 
+    def test_the_page_shows_the_final_approach_time(self):
+        helpers.append_charge(self.path, {
+            'timestamp': '2026-10-16T01:41:53', 'profile': '', 'outcome': 'complete',
+            'target': '55.00', 'final': '54.98', 'error': '-0.02', 'unit': 'GRAINS',
+            'pulses': '8', 'seconds': '12.1', 'learned_rate': '0.0968', 'landed': '54.98',
+            'pulse_seconds': '7.4'})
+        self.record(0.01)   # recorded before the column existed
+        body = self.client.get('/app/history').get_data(as_text=True)
+        self.assertIn('<th>Pulsing</th>', body)
+        self.assertIn('<td>7.4s</td>', body)
+        self.assertIn('<td>—</td>', body)
+
     def test_empty_history_says_so_rather_than_failing(self):
         page = self.client.get('/app/history')
         self.assertEqual(page.status_code, 200)
@@ -245,7 +280,8 @@ class ProfilePageTest(AppTestCase):
 
     def test_saving_captures_the_settings_and_the_learned_rate(self):
         self.memcache['trickler_pulse_rate'] = 0.375
-        self.client.post('/app/profile', data={'profile': 'Varget', 'save': '1'})
+        body = self.client.post('/app/profile', data={
+            'profile': 'Varget', 'save': '1'}).get_data(as_text=True)
 
         config = configparser.ConfigParser()
         config.optionxform = str
@@ -253,6 +289,17 @@ class ProfilePageTest(AppTestCase):
         self.assertIn('profile:Varget', config.sections())
         self.assertEqual(float(config['profile:Varget']['pulse_rate']), 0.375)
         self.assertEqual(self.memcache['active_profile'], 'Varget')
+        self.assertIn('Saved Varget. Starting feed rate set to 0.375 /s, the rate learned '
+                      'so far.', body)
+
+    def test_saving_with_nothing_learned_does_not_claim_a_learned_rate(self):
+        """Bench, 2026-10-16: it said "including a learned feed rate of" the starting
+        rate whether anything had been learned or not."""
+        body = self.client.post('/app/profile', data={
+            'profile': 'Varget', 'save': '1'}).get_data(as_text=True)
+        self.assertIn('Saved Varget.', body)
+        self.assertNotIn('learned feed rate of', body)
+        self.assertNotIn('rate learned so far.', body)
 
     def test_saving_without_a_name_is_refused(self):
         body = self.client.post('/app/profile', data={'save': '1'}).get_data(as_text=True)
@@ -420,23 +467,59 @@ class CalibratePageTest(AppTestCase):
         self.assertIn('action="/app/calibrate/apply"', body)
         self.assertNotIn('id="nothing-to-apply"', body)
 
-    def test_the_prediction_is_shown_beside_what_the_charges_did(self):
-        charges = os.path.join(self.directory, 'charges.csv')
-        for seconds, landed in (('9.9', '55.00'), ('9.6', '55.02'), ('30.0', '54.98')):
-            helpers.append_charge(charges, {
-                'timestamp': '2026-10-04T23:16:31', 'profile': 'Varget', 'outcome': 'complete',
-                'target': '55.00', 'final': '54.98', 'error': '-0.02', 'unit': 'GRAINS',
-                'pulses': '5', 'seconds': seconds, 'learned_rate': '0.38', 'landed': landed})
-        helpers.append_charge(charges, {
-            'timestamp': '2026-10-04T23:17:00', 'profile': 'Varget', 'outcome': 'empty',
-            'target': '55.00', 'final': '54.40', 'error': '-0.60', 'unit': 'GRAINS',
-            'pulses': '8', 'seconds': '4.9', 'learned_rate': '0.14', 'landed': ''})
+    # The settings the fixture's calibration simulated as current (results() above).
+    SIMULATED = {'pulse_pwm': '30', 'pulse_fast_pwm': '45', 'pulse_fast_until': '0.1',
+                 'pulse_on_time': '0.25', 'pulse_trickle_weight': '0.5', 'pulse_aim': '0.85',
+                 'settle_min_time': '0.3'}
+
+    def charge(self, pulse_seconds='6.0', landed='55.00', outcome='complete', **settings):
+        row = dict(self.SIMULATED, timestamp='2026-10-16T01:41:53', profile='Varget',
+                   outcome=outcome, target='55.00', final='54.98', error='-0.02',
+                   unit='GRAINS', pulses='5', seconds='11.0', learned_rate='0.38',
+                   landed=landed, pulse_seconds=pulse_seconds)
+        row.update(settings)
+        helpers.append_charge(os.path.join(self.directory, 'charges.csv'), row)
+
+    def test_the_prediction_is_checked_against_charges_at_the_simulated_settings(self):
+        """Bench, 2026-10-16: the check took every charge for the profile -- six over
+        twelve days, at settings it no longer held -- and compared whole-trickle seconds
+        with the simulated final approach."""
+        for pulse_seconds, landed in (('6.0', '55.00'), ('7.0', '55.02'), ('8.0', '54.98')):
+            self.charge(pulse_seconds, landed)
+        self.charge('2.0', '55.04', pulse_trickle_weight='0.8')      # other settings
+        self.charge('2.0', '55.04', outcome='empty')                 # not a charge
+        helpers.append_charge(os.path.join(self.directory, 'charges.csv'), {
+            'timestamp': '2026-10-04T23:16:31', 'profile': 'Varget', 'outcome': 'complete',
+            'target': '55.00', 'final': '54.98', 'pulses': '5', 'seconds': '3.0',
+            'landed': '55.04'})                                      # before settings were kept
+        results = self.results()
+        results['recommendation']['current']['prediction']['pulse_seconds'] = 6.4
+        self.status(phase='done', finished=True, results=results)
+        body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
+        self.assertIn('last 3\n              completed charges', body)
+        self.assertIn('Seconds in the final approach', body)
+        self.assertIn('<td>6.4</td>', body, 'predicted final approach')
+        self.assertIn('<td>7.0</td>', body, 'mean final approach of the three')
+        self.assertIn('33%', body, 'one of three landed heavy')
+
+    def test_charges_at_other_settings_leave_nothing_to_check(self):
+        self.charge(pulse_trickle_weight='0.8')
         self.status(phase='done', finished=True, results=self.results())
         body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
-        self.assertIn('id="measured"', body)
-        self.assertIn('last 3 completed charges', body, 'the empty one is not a charge')
-        self.assertIn('16.5', body, 'mean seconds of the three')
-        self.assertIn('33%', body, 'one of three landed heavy')
+        self.assertIn('nothing to check the prediction against', body)
+        self.assertIn('needs\n              no new calibration', body)
+
+    def test_the_settle_the_sweep_was_read_at_must_match_too(self):
+        self.charge()
+        self.status(phase='done', finished=True, results=self.results(settle_min_time=0.6))
+        body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
+        self.assertIn('nothing to check the prediction against', body)
+
+    def test_a_calibration_stored_before_final_approach_seconds_shows_a_dash(self):
+        self.charge()
+        self.status(phase='done', finished=True, results=self.results())
+        body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
+        self.assertRegex(body, r'Seconds in the final approach</td>\s*<td>&mdash;</td>')
 
     def test_without_charges_the_page_says_there_is_nothing_to_check_against(self):
         self.status(phase='done', finished=True, results=self.results())
@@ -457,6 +540,15 @@ class CalibratePageTest(AppTestCase):
         self.assertIn('Pulse speed: 30 to 25', body)
         self.assertIn('11.1', body)
         self.assertIn('kept; fit 0.00 not credible', body)
+
+    def test_a_spin_up_with_no_fit_says_why_it_was_kept(self):
+        """Bench, 2026-10-16: the page said only "kept" at 25% and 30%."""
+        results = self.results(dead_time_sources={'30.0': 'kept', '45.0': 'fit'},
+                               dead_times_fitted={'30.0': None, '45.0': 0.12})
+        self.status(phase='done', finished=True, results=results)
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('kept; no fit: too few pulses per length, or the longer ones did not '
+                      'drop more', body)
 
     def test_results_render_from_the_record_when_memcache_has_forgotten(self):
         helpers.write_json(self.learned, {'Varget': {
@@ -487,8 +579,7 @@ class CalibratePageTest(AppTestCase):
         form['save_profile'] = 'Varget'
         body = self.client.post('/app/calibrate/apply', data=form,
                                 follow_redirects=True).get_data(as_text=True)
-        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '45')
-        self.assertEqual(self.memcache['trickler_settings']['stall_pwm'], '18')
+        self.assertNotIn('trickler_settings', self.memcache, 'saved, so nothing live')
         self.assertEqual(self.memcache['active_profile'], 'Varget')
         self.assertEqual(self.memcache['trickler_command'], {
             'command': 'calibrate_apply', 'profile': 'Varget',
@@ -497,6 +588,7 @@ class CalibratePageTest(AppTestCase):
         config.optionxform = str
         config.read(self.ini)
         self.assertEqual(config['profile:Varget']['pulse_pwm'], '45')
+        self.assertEqual(config['profile:Varget']['stall_pwm'], '18')
         self.assertEqual(config['profile:Varget']['pulse_trickle_weight'], '0.5')
         self.assertIn('[profile:Varget]', body)
 
@@ -512,8 +604,23 @@ class CalibratePageTest(AppTestCase):
     def test_apply_clamps_like_the_tuning_page(self):
         body = self.client.post('/app/calibrate/apply', data={
             'pulse_pwm': '999', 'save_profile': ''}, follow_redirects=True).get_data(as_text=True)
-        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '100')
-        self.assertIn('adjusted', body)
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(self.ini)
+        self.assertEqual(config['trickler']['pulse_pwm'], '100')
+        self.assertIn('adjusted: Pulse speed must be between 0 and 100, clamped to 100.', body)
+
+    def test_the_apply_form_submits_fitted_values_finer_than_a_fields_step(self):
+        """The fitted rate and spin-up come to four decimals, in fields stepped 0.01 and
+        0.005. With the browser's own validation on, Chrome refuses to submit them, and
+        Apply does nothing."""
+        results = self.results()
+        results['recommendation']['recommended']['settings'].update(
+            pulse_rate=0.0843, pulse_dead_time=0.1183)
+        self.status(phase='done', finished=True, results=results)
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('value="0.0843"', body)
+        self.assertRegex(body, r'<form [^>]*action="/app/calibrate/apply"[^>]*novalidate')
 
     def test_every_post_that_acts_leaves_the_browser_on_a_get(self):
         """The page fetches itself again when the routine finishes. On the first bench
@@ -624,6 +731,23 @@ class ProfileRecallTest(AppTestCase):
         self.assertEqual(config['profile:Varget']['pulse_pwm'], '33')
         self.assertEqual(config['trickler']['pulse_pwm'], before, '[trickler] untouched')
 
+    def test_a_learned_rate_saved_into_a_profile_can_be_applied(self):
+        """Bench, 2026-10-16: Save stored the learned rate, 0.0625, as the starting feed
+        rate, a field stepped 0.01. Chrome refused the form from then on, so Apply did
+        nothing on that profile. The server takes any value in range."""
+        self.memcache['trickler_pulse_rate'] = 0.0625
+        body = self.client.post('/app/profile', data={
+            'new_profile': 'Test', 'save': '1'}).get_data(as_text=True)
+        self.assertIn('value="0.0625"', body)
+        self.assertRegex(body, r'<form [^>]*action="/app/config/update"[^>]*novalidate')
+        form = dict(app.current_trickler_settings()[0], pulse_aim='0.65')
+        body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
+        self.assertIn('Applied. The next charge will use these values, saved to [profile:Test].',
+                      body)
+        section = self.read_ini()['profile:Test']
+        self.assertEqual(section['pulse_rate'], '0.0625')
+        self.assertEqual(section['pulse_aim'], '0.65')
+
     def test_apply_with_no_profile_saves_to_the_plain_settings(self):
         form = dict(app.current_trickler_settings()[0], pulse_pwm='33')
         body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
@@ -652,13 +776,17 @@ class ProfileRecallTest(AppTestCase):
         self.assertIn('Not saved', body)
         self.assertNotIn('profile:bad]name', open(self.ini, encoding='utf-8').read())
 
-    def test_calibrate_apply_keeps_its_values_when_it_switches_profile(self):
-        """Switching drops the live values; Apply must switch first, then set its own."""
+    def test_calibrate_apply_to_another_profile_puts_its_values_in_force(self):
         self.save_profile('Varget', pulse_pwm=28)
         self.memcache['active_profile'] = 'Varget'
+        self.memcache['trickler_settings'] = {'pulse_aim': '0.5'}   # left from Varget
         self.client.post('/app/calibrate/apply', data={'pulse_pwm': '41', 'save_profile': 'New'})
         self.assertEqual(self.memcache['active_profile'], 'New')
-        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '41')
+        self.assertEqual(self.read_ini()['profile:New']['pulse_pwm'], '41')
+        values, live = app.current_trickler_settings()
+        self.assertEqual(values['pulse_pwm'], '41')
+        self.assertFalse(live)
+        self.assertNotEqual(values['pulse_aim'], '0.5', "Varget's live value did not carry over")
 
 
 class ProfileDeleteTest(AppTestCase):

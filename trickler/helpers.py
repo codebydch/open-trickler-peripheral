@@ -414,6 +414,14 @@ class ConfigFile:
 
 # One row per charge. Written only by the trickler daemon (which runs as root) and read
 # by the web app (which runs as pi); a single writer keeps the file permissions simple.
+# The final-approach settings a charge was thrown with, recorded beside it. A
+# calibration's prediction for the current settings is checked against the charges
+# thrown at those settings and no others: on 2026-10-16 the check compared it with six
+# charges spread over twelve days, thrown at settings the profile no longer held, and
+# nothing on the page could tell.
+CHARGE_SETTINGS = ('pulse_pwm', 'pulse_fast_pwm', 'pulse_on_time', 'pulse_trickle_weight',
+                   'pulse_aim', 'pulse_fast_until', 'settle_min_time')
+
 HISTORY_COLUMNS = (
     'timestamp',
     'profile',
@@ -428,7 +436,10 @@ HISTORY_COLUMNS = (
     # What the pan weighed a couple of seconds after "complete", once the powder still in
     # the air had come down. Blank when the pan was lifted first or landed_wait is 0.
     'landed',
-)
+    # Seconds of the final approach alone, from the handover to the end; `seconds` is the
+    # whole trickle after the dump. The calibration simulates only the final approach.
+    'pulse_seconds',
+) + CHARGE_SETTINGS
 
 
 # One row per pulse of the final approach: the raw material the feed rate and the motor
@@ -448,7 +459,7 @@ PULSE_COLUMNS = (
     # 'charge' for the final approach of a normal charge, 'calibration' for the routine.
     'source',
     # What landed in the second after the dose was read. The calibration routine measures
-    # it on every third pulse; charges leave it blank.
+    # it on every pulse; charges leave it blank.
     'tail',
 )
 

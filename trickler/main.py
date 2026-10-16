@@ -446,6 +446,9 @@ class FeedModels:
         self._models = {}
         self.calibration = None
 
+    def __contains__(self, profile):
+        return profile in self._models
+
     def for_settings(self, settings):
         """The model for the profile these settings name, built on first use."""
         model = self._models.get(settings.profile)
@@ -783,7 +786,7 @@ def learned_rate_key(constants, profile, fast=False):
 
 
 def record_charge(settings, target_weight, final_weight, target_unit, outcome,
-                  pulses, seconds, learned_rate, landed=None):
+                  pulses, seconds, learned_rate, landed=None, pulse_seconds=None):
     """Writes one finished charge to the history file.
 
     Never raises. A history file that cannot be written is a nuisance; a trickler that
@@ -804,6 +807,8 @@ def record_charge(settings, target_weight, final_weight, target_unit, outcome,
             'seconds': round(seconds, 1),
             'learned_rate': round(learned_rate, 4),
             'landed': '' if landed is None else landed,
+            'pulse_seconds': '' if pulse_seconds is None else round(pulse_seconds, 1),
+            **{name: '%g' % float(getattr(settings, name)) for name in helpers.CHARGE_SETTINGS},
         }, settings.history_max_rows)
     except Exception:
         # Called from a finally block, where raising would mask whatever actually ended
@@ -847,6 +852,16 @@ def seed_memcache(memcache, values, overwrite=None):
             logging.debug('Keeping existing memcache value for %s', key)
 
 
+def active_profile(config, memcache, constants):
+    """The powder profile in force: the page's live selection, else the config file's."""
+    profile = ''
+    if memcache is not None and constants is not None:
+        profile = memcache.get(constants.ACTIVE_PROFILE.value) or ''
+    if not profile and config.has_section('profiles'):
+        profile = config['profiles'].get('active', '')
+    return profile
+
+
 def trickler_settings(config, memcache, constants, scale, target_unit):
     """Reads the trickler thresholds in force right now, converted to the target unit.
 
@@ -859,14 +874,11 @@ def trickler_settings(config, memcache, constants, scale, target_unit):
     tuned in, so they need converting when the scale is set to grams.
     """
     overrides = {}
-    profile = ''
     if memcache is not None and constants is not None:
         overrides = memcache.get(constants.TRICKLER_SETTINGS.value)
         if not isinstance(overrides, dict):
             overrides = {}
-        profile = memcache.get(constants.ACTIVE_PROFILE.value) or ''
-    if not profile and config.has_section('profiles'):
-        profile = config['profiles'].get('active', '')
+    profile = active_profile(config, memcache, constants)
     history = helpers.history_files(config)
     configured = config['trickler'] if config.has_section('trickler') else {}
     # Live overrides win, then the selected powder's profile, then the plain [trickler]
@@ -1060,6 +1072,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
     feeder = PulseFeeder(trickler_motor1, scale, settings, memcache, constants, model=model)
     stale_since = None
     started = time.time()
+    pulse_started = None
     outcome = None
     pidtune_logger.info('timestamp, input (motor %), output (weight %)')
     logging.info('Starting trickling process...')
@@ -1137,6 +1150,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
             if projected_remainder <= settings.pulse_trickle_weight:
                 trickler_motor1.off()
                 trickler_motor2.off()
+                pulse_started = time.time()
                 outcome = pulse_phase(
                     memcache, constants, feeder, scale, target_weight, target_unit)
                 break
@@ -1180,6 +1194,8 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
         # mode switched off, pan lifted, a fault -- is visible in the history instead of
         # silently missing. `outcome` is only set where the charge actually finished.
         seconds = time.time() - started
+        # A charge that finished before the handover had no final approach.
+        pulse_seconds = 0.0 if pulse_started is None else time.time() - pulse_started
         # The reading the charge ended on, taken before anything reads the scale again:
         # landed_weight() below updates scale.weight as it goes.
         final = scale.weight
@@ -1192,7 +1208,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
             logging.info('Landed: %s %s (complete at %s)', landed, target_unit, final)
         record_charge(settings, target_weight, final, target_unit,
                       outcome or 'aborted', feeder.pulses, seconds, feeder.rate,
-                      landed=landed)
+                      landed=landed, pulse_seconds=pulse_seconds)
         record_pulses(settings, feeder.records, target_unit)
     logging.info('Trickling process stopped.')
 
@@ -1362,6 +1378,18 @@ def run_pass(config, memcache, constants, hw, models, last_status=None):
         logging.info('scale.unit: %r, target_unit: %r', hw.scale.unit, target_unit)
         hw.scale.change_unit()
 
+    # The tuning page shows a profile's learned rate from memcache, and only a loaded
+    # model puts it there. Models used to be built at startup, for the profile in use
+    # then, and at a charge: after Use, or a reboot with another profile in use, the
+    # page said "not learned yet" until a charge had run.
+    if active_profile(config, memcache, constants) not in models:
+        try:
+            models.for_settings(trickler_settings(
+                config, memcache, constants, hw.scale, target_unit))
+        except Exception:
+            # Every pass would repeat it; a charge reports the same fault loudly.
+            logging.debug('Could not load the learned feed rates.', exc_info=True)
+
     # Only log when something actually changes. Logging every pass filled the
     # journal with tens of identical lines a second and buried real errors. And when the
     # reading itself is what keeps changing, no more than once a second -- the state that
@@ -1447,14 +1475,9 @@ def main(config, memcache, args, pidtune_logger):
         constants.TARGET_UNIT.value: False,
     })
 
-    models = FeedModels(memcache, constants)
-    # Load the active powder's learned rates now rather than at the first charge, so the
+    # The active profile's learned rates are loaded on the first pass (run_pass), so the
     # tuning page shows them straight after a reboot instead of "not learned yet".
-    try:
-        models.for_settings(trickler_settings(
-            config, memcache, constants, hw.scale, memcache.get(constants.TARGET_UNIT.value)))
-    except Exception:
-        logging.warning('Could not load the learned feed rates at startup.', exc_info=True)
+    models = FeedModels(memcache, constants)
 
     # Outer-most control loop for the whole trickler system.
     last_status = None
