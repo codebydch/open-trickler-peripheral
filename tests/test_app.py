@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import helpers
 
@@ -58,22 +59,44 @@ class TuningPageTest(AppTestCase):
         for setting in helpers.TRICKLER_SETTINGS:
             self.assertIn('name="%s"' % setting.name, body)
 
-    def test_post_applies_live_and_persists(self):
-        form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
-        form['pulse_min_on_time'] = '0.02'
-        self.client.post('/app/config/update', data=form)
-
-        self.assertEqual(self.memcache['trickler_settings']['pulse_min_on_time'], '0.02')
+    def read_ini(self):
         config = configparser.ConfigParser()
         config.optionxform = str
         config.read(self.ini)
-        self.assertEqual(config['trickler']['pulse_min_on_time'], '0.02')
+        return config
+
+    def test_post_saves_to_the_file_and_sets_no_live_values(self):
+        """The trickler follows the file. Apply used to set live values as well, so the
+        page warned of them after every Apply, and they could outlive what was saved."""
+        form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
+        form['pulse_min_on_time'] = '0.02'
+        body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
+        self.assertEqual(self.read_ini()['trickler']['pulse_min_on_time'], '0.02')
+        self.assertNotIn('trickler_settings', self.memcache)
+        self.assertNotIn('live ones', body)
+        self.assertIn('value="0.02"', body)
+
+    def test_post_drops_live_values_left_over(self):
+        self.memcache['trickler_settings'] = {'pulse_pwm': '99'}
+        form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
+        self.client.post('/app/config/update', data=form)
+        self.assertNotIn('trickler_settings', self.memcache)
+
+    def test_a_file_that_cannot_be_written_falls_back_to_live_values(self):
+        form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
+        form['pulse_pwm'] = '33'
+        with mock.patch.object(helpers, 'update_ini_section',
+                               side_effect=PermissionError('read-only')):
+            body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
+        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '33')
+        self.assertIn('could not be written (read-only)', body)
+        self.assertIn('live ones', body)
 
     def test_post_clamps_and_says_so(self):
         form = {s.name: s.default for s in helpers.TRICKLER_SETTINGS}
         form['pulse_pwm'] = '999'
         body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
-        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '100')
+        self.assertEqual(self.read_ini()['trickler']['pulse_pwm'], '100')
         self.assertIn('clamped', body)
 
     def test_saving_keeps_the_config_comments(self):
@@ -487,8 +510,7 @@ class CalibratePageTest(AppTestCase):
         form['save_profile'] = 'Varget'
         body = self.client.post('/app/calibrate/apply', data=form,
                                 follow_redirects=True).get_data(as_text=True)
-        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '45')
-        self.assertEqual(self.memcache['trickler_settings']['stall_pwm'], '18')
+        self.assertNotIn('trickler_settings', self.memcache, 'saved, so nothing live')
         self.assertEqual(self.memcache['active_profile'], 'Varget')
         self.assertEqual(self.memcache['trickler_command'], {
             'command': 'calibrate_apply', 'profile': 'Varget',
@@ -497,6 +519,7 @@ class CalibratePageTest(AppTestCase):
         config.optionxform = str
         config.read(self.ini)
         self.assertEqual(config['profile:Varget']['pulse_pwm'], '45')
+        self.assertEqual(config['profile:Varget']['stall_pwm'], '18')
         self.assertEqual(config['profile:Varget']['pulse_trickle_weight'], '0.5')
         self.assertIn('[profile:Varget]', body)
 
@@ -512,7 +535,10 @@ class CalibratePageTest(AppTestCase):
     def test_apply_clamps_like_the_tuning_page(self):
         body = self.client.post('/app/calibrate/apply', data={
             'pulse_pwm': '999', 'save_profile': ''}, follow_redirects=True).get_data(as_text=True)
-        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '100')
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(self.ini)
+        self.assertEqual(config['trickler']['pulse_pwm'], '100')
         self.assertIn('adjusted: Pulse speed must be between 0 and 100, clamped to 100.', body)
 
     def test_the_apply_form_submits_fitted_values_finer_than_a_fields_step(self):
@@ -681,13 +707,17 @@ class ProfileRecallTest(AppTestCase):
         self.assertIn('Not saved', body)
         self.assertNotIn('profile:bad]name', open(self.ini, encoding='utf-8').read())
 
-    def test_calibrate_apply_keeps_its_values_when_it_switches_profile(self):
-        """Switching drops the live values; Apply must switch first, then set its own."""
+    def test_calibrate_apply_to_another_profile_puts_its_values_in_force(self):
         self.save_profile('Varget', pulse_pwm=28)
         self.memcache['active_profile'] = 'Varget'
+        self.memcache['trickler_settings'] = {'pulse_aim': '0.5'}   # left from Varget
         self.client.post('/app/calibrate/apply', data={'pulse_pwm': '41', 'save_profile': 'New'})
         self.assertEqual(self.memcache['active_profile'], 'New')
-        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '41')
+        self.assertEqual(self.read_ini()['profile:New']['pulse_pwm'], '41')
+        values, live = app.current_trickler_settings()
+        self.assertEqual(values['pulse_pwm'], '41')
+        self.assertFalse(live)
+        self.assertNotEqual(values['pulse_aim'], '0.5', "Varget's live value did not carry over")
 
 
 class ProfileDeleteTest(AppTestCase):

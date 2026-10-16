@@ -95,9 +95,11 @@ the SD card.
 | `/flask.html` | Control panel log |
 | `/system.html` | Full system log |
 
-Changes made on the tuning page apply to the **next charge** without restarting anything,
-and are saved to the selected profile in `opentrickler_config.ini` (or to `[trickler]`
-when none is selected) so they survive a reboot.
+Changes made on the tuning page are saved to the selected profile in
+`opentrickler_config.ini` (or to `[trickler]` when none is selected), and the trickler
+follows the file: the **next charge** uses them, without restarting anything, and they
+survive a reboot. Only if the file cannot be written does the page hold them as live
+values, until the next restart, and say so.
 
 ## Calibrating for a powder
 
@@ -126,9 +128,9 @@ proposes settings for it:
    those disagree by much, the recommendation is not worth trying yet. The "Change one
    thing" table lists your current settings with a single value moved, best first: the
    way to try the calibration's advice one bench run at a time, from the tuning page. Edit anything you
-   like, then **Apply**: the values go live for the next charge, are written to the
-   profile (or to `[trickler]` with no name), and the profile's learned feed rates are
-   seeded from the calibration. The results also stay with the profile in
+   like, then **Apply**: the values are written to the profile (or to `[trickler]` with
+   no name), the next charge uses them, and the profile's learned feed rates are seeded
+   from the calibration. The results also stay with the profile in
    `learned.json`, so the page shows them again later.
 5. The prediction is only a prediction. Throw half a dozen charges and look at the
    **Landed** column on the history page; that is what decides whether the settings stay.
