@@ -104,6 +104,17 @@
       button:hover { background-color: #0056b3; }
       .secondary { background-color: #6c757d; }
       .secondary:hover { background-color: #5a6268; }
+      .danger { background-color: #dc3545; }
+      .danger:hover { background-color: #b02a37; }
+      .profile input[type="text"] {
+        padding: 9px;
+        font-size: 15px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        width: 180px;
+      }
+      .actions.profile-actions { border-top: none; padding-top: 0; margin-top: 4px; }
+      .editing { font-size: 14px; color: #495057; margin: 0 0 12px; }
       .actions {
         border-top: 1px solid #e9ecef;
         padding-top: 16px;
@@ -152,8 +163,9 @@
 
       <p class="intro">
         These control how the trickler finishes a charge. Changes apply to the next
-        charge straight away &mdash; no restart &mdash; and are written back to the
-        config file so they survive a reboot.
+        charge straight away &mdash; no restart &mdash; and are saved to the selected
+        powder profile (or to the plain settings when none is selected), so they survive
+        a reboot.
       </p>
 
       <div class="alarm" id="jam" hidden></div>
@@ -172,18 +184,25 @@
         <form method="post" action="/app/profile">
           <label for="profile">Powder profile</label>
           <p>
-            Each profile keeps its own learned feed rate, so switching powder doesn't mean
-            learning it again. Saving stores the settings below plus the rate learned so
-            far &mdash; do it once a powder is throwing well.
+            Each profile keeps its own settings and learned feed rate, so switching powder
+            brings both back. <strong>Use</strong> puts the selected profile's saved
+            settings in force. <strong>Save</strong> stores the settings below, plus the
+            rate learned so far, into the selected profile &mdash; or into a new one if you
+            type a name.
           </p>
           <select id="profile" name="profile">
-            <option value="">(none &mdash; use the settings below)</option>
+            <option value="">(none &mdash; the plain settings)</option>
             {% for name in profiles %}
               <option value="{{ name }}" {% if name == profile %}selected{% endif %}>{{ name }}</option>
             {% endfor %}
           </select>
-          <button type="submit" name="select">Use</button>
-          <button type="submit" name="save" class="secondary">Save current settings to it</button>
+          <input type="text" id="new_profile" name="new_profile" placeholder="or a new name"
+                 maxlength="40" aria-label="New profile name">
+          <div class="actions profile-actions">
+            <button type="submit" name="select">Use</button>
+            <button type="submit" name="save" class="secondary">Save</button>
+            <button type="submit" name="delete" class="danger" id="delete-profile">Delete</button>
+          </div>
         </form>
         <p class="learned">
           {% if profile %}Using <strong>{{ profile }}</strong>.{% else %}No profile selected.{% endif %}
@@ -197,10 +216,14 @@
       </div>
 
       {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+      <p class="editing" id="editing">
+        {% if section == 'trickler' %}Editing the plain <code>[trickler]</code> settings.
+        {% else %}Editing <strong>{{ profile }}</strong>: Apply saves to this profile.{% endif %}
+      </p>
       {% if live %}
         <div class="warn">
-          Some values are currently overridden from this page. "Revert to config file"
-          below drops them.
+          Some values in force are live ones from this page. "Revert to saved" below
+          drops them and goes back to what is saved.
         </div>
       {% endif %}
 
@@ -221,7 +244,7 @@
         <div class="actions">
           <button type="submit" name="save">Apply</button>
           <button type="submit" name="reset_overrides" class="secondary"
-                  formnovalidate>Revert to config file</button>
+                  formnovalidate>Revert to saved</button>
           <button type="submit" name="reset_learned" class="secondary"
                   formnovalidate>Clear learned feed rate</button>
         </div>
@@ -236,6 +259,19 @@
     </div>
 
     <script>
+      // Deleting cannot be undone, so say what it does and to which profile first.
+      document.getElementById('delete-profile').addEventListener('click', function (event) {
+        var name = document.getElementById('profile').value;
+        if (!name) {
+          return;  // the server says to select one first
+        }
+        if (!window.confirm('Delete the profile "' + name + '"? Its saved settings, ' +
+                            'learned feed rates and calibration are removed. Its charges ' +
+                            'stay in the history.')) {
+          event.preventDefault();
+        }
+      });
+
       // Poll the live values so the readings above track what the trickler is doing
       // while you tune. Failures are ignored; the page is still usable without them.
       function refresh() {

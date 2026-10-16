@@ -69,21 +69,35 @@ def safe_get(key, default=None):
     return default if value is None else value
 
 
-def current_trickler_settings():
-    """The tuning values in force: live overrides first, then config file, then defaults.
+def current_trickler_settings(profile=None):
+    """The tuning values in force, layered exactly as the trickler layers them: live
+    overrides, then the selected profile's saved values, then [trickler], then defaults.
+
+    It used to skip the profile, so with a profile selected this page showed -- and
+    Apply wrote -- the plain [trickler] values, which the profile hides from the trickler.
+    `profile` names a profile to read instead of the selected one.
 
     Returns (values, live) where live says whether any value is currently overridden
     from this page rather than coming from the config file.
     """
+    profile = active_profile() if profile is None else profile
     overrides = safe_get(constants.TRICKLER_SETTINGS.value, {})
     if not isinstance(overrides, dict):
         overrides = {}
+    saved = helpers.profile_settings(config, profile)
     configured = dict(config['trickler']) if config.has_section('trickler') else {}
     values = {}
     for setting in helpers.TRICKLER_SETTINGS:
-        values[setting.name] = str(
-            overrides.get(setting.name, configured.get(setting.name, setting.default)))
+        values[setting.name] = str(overrides.get(
+            setting.name, saved.get(setting.name, configured.get(setting.name, setting.default))))
     return values, bool(overrides)
+
+
+def settings_section(profile=None):
+    """Where the tuning page saves: the selected profile's section, else [trickler]."""
+    profile = active_profile() if profile is None else profile
+    section = helpers.profile_section(profile) if profile else 'trickler'
+    return section if profile and config.has_section(section) else 'trickler'
 
 
 def active_profile():
@@ -269,8 +283,14 @@ def send_command(command, **fields):
 def select_profile(name):
     """Makes a profile the live one and remembers it in the config file.
 
+    Switching to a different profile drops the live overrides, so the new profile's
+    saved values take effect at once. They used to stay, and win over the profile, so
+    switching between two saved profiles left the settings exactly where they were.
+
     Returns a note about the file if it could not be written, else ''.
     """
+    if name != active_profile():
+        memcache_client.delete(constants.TRICKLER_SETTINGS.value)
     set_memcache_value(constants.ACTIVE_PROFILE.value, name)
     try:
         helpers.update_ini_section(args.config_file, 'profiles', {'active': name})
@@ -314,6 +334,8 @@ def calibrate_start():
     """Asks the daemon to calibrate: the profile, the container's capacity, the cell size."""
     name = (request.form.get('new_profile') or request.form.get('profile') or '').strip()
     errors = {}
+    if name and helpers.profile_name_problem(name):
+        errors['profile'] = helpers.profile_name_problem(name)
     try:
         capacity = float(request.form.get('capacity', ''))
         if capacity < 20:
@@ -398,7 +420,13 @@ def calibrate_apply():
     calibration at the speeds now in force rather than probed again.
     """
     name = (request.form.get('save_profile') or '').strip()
-    current, _ = current_trickler_settings()
+    problem = helpers.profile_name_problem(name) if name else None
+    if problem:
+        return back_to_calibrate(active_profile(), 'Not applied. ' + problem)
+    # Select first: switching profile drops the live overrides, and the ones set below
+    # are the values being applied.
+    selected = select_profile(name)
+    current, _ = current_trickler_settings(name)
     submitted = {key: request.form[key] for key in CALIBRATION_FIELDS if key in request.form}
     values, errors = helpers.clean_trickler_settings(submitted, current)
     set_memcache_value(constants.TRICKLER_SETTINGS.value, values)
@@ -413,8 +441,7 @@ def calibrate_apply():
         logging.warning('Could not write %s: %s', args.config_file, exc)
         notice += ', but %s could not be written (%s), so they will be lost on restart.' % (
             args.config_file, exc)
-    if name:
-        notice += select_profile(name)
+    notice += selected
     send_command('calibrate_apply', profile=name,
                  pulse_pwm=float(values['pulse_pwm']), pulse_fast_pwm=float(values['pulse_fast_pwm']))
     if errors:
@@ -434,6 +461,7 @@ def render_config(errors=None, notice=None):
         notice=notice,
         profiles=helpers.list_profiles(config),
         profile=active_profile(),
+        section=settings_section(),
         learned_rate=learned_rate(),
         learned_fast_rate=learned_rate(fast=True))
 
@@ -484,21 +512,23 @@ def pulses_json():
 @app.route('/app/profile', methods=['POST'])
 def update_profile():
     """Selects, saves or deletes a powder profile."""
-    name = (request.form.get('profile') or '').strip()
+    selected = (request.form.get('profile') or '').strip()
+    new_name = (request.form.get('new_profile') or '').strip()
 
     if 'select' in request.form:
-        set_memcache_value(constants.ACTIVE_PROFILE.value, name)
-        notice = 'Using %s.' % name if name else 'Using the plain [trickler] settings.'
-        try:
-            helpers.update_ini_section(args.config_file, 'profiles', {'active': name})
-        except OSError as exc:
-            notice += ' It will not survive a restart: %s could not be written (%s).' % (
-                args.config_file, exc)
-        return render_config(notice=notice)
+        notice = ('Using %s: its saved settings are in force.' % selected if selected
+                  else 'Using the plain [trickler] settings.')
+        return render_config(notice=notice + select_profile(selected))
 
     if 'save' in request.form:
-        if not name:
-            return render_config(notice='Give the profile a name before saving it.')
+        name = new_name or selected
+        problem = helpers.profile_name_problem(name)
+        if problem:
+            return render_config(notice='Not saved. ' + problem)
+        if new_name and new_name in helpers.list_profiles(config):
+            return render_config(notice=(
+                'Not saved: a profile called %s already exists. Select it and press Save '
+                'to overwrite it.' % new_name))
         # Store the values currently in force, plus whatever rate has been learned, so a
         # profile captures a setup that is known to work.
         values, _ = current_trickler_settings()
@@ -513,12 +543,48 @@ def update_profile():
             config.read(args.config_file)
         except OSError as exc:
             return render_config(notice='Could not write %s: %s' % (args.config_file, exc))
-        set_memcache_value(constants.ACTIVE_PROFILE.value, name)
+        note = select_profile(name)
+        # The section now holds exactly what the overrides held.
+        memcache_client.delete(constants.TRICKLER_SETTINGS.value)
         return render_config(
-            notice='Saved %s, including a learned feed rate of %s.'
-                   % (name, values.get('pulse_rate', 'the configured default')))
+            notice='Saved %s, including a learned feed rate of %s.%s'
+                   % (name, values.get('pulse_rate', 'the configured default'), note))
+
+    if 'delete' in request.form:
+        return delete_profile(selected)
 
     return render_config(notice='Nothing to do.')
+
+
+def delete_profile(name):
+    """Removes a profile: its section, its learned state, and the selection if it was
+    the one in use. Charge and pulse history are records, and stay."""
+    if not name:
+        return render_config(notice='Select the profile to delete first.')
+    if name not in helpers.list_profiles(config):
+        return render_config(notice='There is no profile called %s.' % name)
+    status = calibration_status()
+    if calibration_running(status) and (status.get('profile') or '') == name:
+        return render_config(notice=(
+            '%s is being calibrated. Abort or wait for the calibration first.' % name))
+    section = helpers.profile_section(name)
+    try:
+        helpers.remove_ini_section(args.config_file, section)
+    except OSError as exc:
+        return render_config(notice='Could not write %s: %s' % (args.config_file, exc))
+    # config.read() adds and updates sections but never drops one.
+    config.remove_section(section)
+    note = select_profile('') if name == active_profile() else ''
+    # The page reads these; the trickler forgets its own copies on the command below.
+    for key in (constants.TRICKLER_PULSE_RATE.value, constants.TRICKLER_FAST_PULSE_RATE.value):
+        memcache_client.delete(helpers.profile_key(key, name))
+    if status and (status.get('profile') or '') == name:
+        memcache_client.delete(helpers.calibration_status_key(constants))
+    send_command('delete_profile', profile=name)
+    logging.info('Deleted profile %s.', name)
+    return render_config(notice=(
+        'Deleted %s: its saved settings, learned feed rates and calibration are gone. '
+        'Its charges stay in the history.%s' % (name, note)))
 
 
 @app.route('/app/config/')
@@ -547,15 +613,21 @@ def update_trickler_config():
     if 'reset_overrides' in request.form:
         memcache_client.delete(constants.TRICKLER_SETTINGS.value)
         logging.info('Cleared live trickler setting overrides.')
-        return render_config(notice='Reverted to the values in the config file.')
+        profile = active_profile()
+        return render_config(notice='Reverted to the values saved for %s.' % (
+            profile or 'the plain [trickler] settings'))
 
     current, _ = current_trickler_settings()
     values, errors = helpers.clean_trickler_settings(request.form, current)
     set_memcache_value(constants.TRICKLER_SETTINGS.value, values)
 
-    notice = 'Applied. The next charge will use these values.'
+    # Saved where the trickler will read it after a reboot: the selected profile's
+    # section, since that section hides [trickler] from it.
+    section = settings_section()
+    notice = 'Applied. The next charge will use these values, saved to [%s].' % section
     try:
-        helpers.update_ini_section(args.config_file, 'trickler', values)
+        helpers.update_ini_section(args.config_file, section, values)
+        config.read(args.config_file)
     except OSError as exc:
         logging.warning('Could not write %s: %s', args.config_file, exc)
         notice = ('Applied for now, but %s could not be written (%s), so these values '

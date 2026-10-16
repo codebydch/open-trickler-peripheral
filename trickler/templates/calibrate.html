@@ -153,6 +153,7 @@
             {% endfor %}
           </select>
           <input type="text" name="new_profile" placeholder="or a new name" maxlength="40">
+          {% if errors.get('profile') %}<p class="error">{{ errors['profile'] }}</p>{% endif %}
         </div>
         <div class="field">
           <label for="capacity">Container capacity, grains</label>

@@ -368,6 +368,26 @@ class FeedModel:
             self._memcache.delete(self._keys[True])
         self.save()
 
+    def forget(self):
+        """Forgets this profile entirely, for a profile that has been deleted: the
+        rates in memory and memcache, and its whole learned.json entry, calibration
+        record included. Charge and pulse history are records and are kept."""
+        self.measured = False
+        self.fast_rate = None
+        if self._keys:
+            for key in self._keys.values():
+                self._memcache.delete(key)
+        if not self.path:
+            return
+        try:
+            data = helpers.read_json(self.path)
+            if self.profile in data:
+                del data[self.profile]
+                helpers.write_json(self.path, data)
+        except OSError:
+            logging.warning('Could not remove %s from %s', self.profile, self.path,
+                            exc_info=True)
+
     def reset(self, settings):
         """Forgets the rates learned for this profile, in memory and in both stores.
 
@@ -437,6 +457,11 @@ class FeedModels:
     def reset(self, settings):
         """Forgets what was learned for the profile these settings name."""
         self.for_settings(settings).reset(settings)
+
+    def forget(self, settings):
+        """Forgets a deleted profile completely, and drops its model."""
+        self.for_settings(settings).forget()
+        self._models.pop(settings.profile, None)
 
 
 class PulseFeeder:
@@ -1218,7 +1243,8 @@ def handle_command(config, memcache, constants, hw, models):
     """Carries out a command the web app left in memcache, if there is one.
 
     The command is taken before it is acted on, so one that fails is not retried every
-    pass. `reset_learned` forgets a profile's rates; `calibrate` starts the calibration
+    pass. `reset_learned` forgets a profile's rates; `delete_profile` forgets a deleted
+    profile altogether, calibration record included; `calibrate` starts the calibration
     routine, which then runs a step at a time from run_pass(); `calibrate_continue` and
     `calibrate_abort` steer it; `calibrate_apply` seeds the rates once its recommendation
     has been applied from the page.
@@ -1238,6 +1264,15 @@ def handle_command(config, memcache, constants, hw, models):
         models.reset(settings._replace(profile=profile))
         logging.info('Forgot the learned feed rates for %s.',
                      profile or 'the plain [trickler] settings')
+    elif name == 'delete_profile':
+        profile = command.get('profile') or ''
+        if not profile:
+            logging.warning('Ignoring a delete_profile command with no profile named.')
+            return
+        target_unit = memcache.get(constants.TARGET_UNIT.value)
+        settings = trickler_settings(config, memcache, constants, hw.scale, target_unit)
+        models.forget(settings._replace(profile=profile))
+        logging.info('Forgot everything learned for the deleted profile %s.', profile)
     elif name == 'calibrate':
         import calibrate  # here, not at the top: calibrate imports this module
         if models.calibration is not None and not models.calibration.finished:
@@ -1392,6 +1427,9 @@ def run_pass(config, memcache, constants, hw, models, last_status=None):
 
 def main(config, memcache, args, pidtune_logger):
     """Main trickler function. This runs everything."""
+    # The web page saves and deletes powder profiles in the config file; follow it, so a
+    # profile saved a minute ago is the one the next charge uses without a restart.
+    config_file = helpers.ConfigFile(args.config_file, config)
     constants = enum.Enum('memcache_vars', config['memcache_vars'])
     hw = build_hardware(config, memcache, pidtune_logger)
 
@@ -1421,6 +1459,7 @@ def main(config, memcache, args, pidtune_logger):
     # Outer-most control loop for the whole trickler system.
     last_status = None
     while 1:
+        config = config_file.refresh()
         last_status = run_pass(config, memcache, constants, hw, models, last_status)
 
 

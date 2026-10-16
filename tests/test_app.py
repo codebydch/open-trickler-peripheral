@@ -566,3 +566,164 @@ class SpacedProfileNameTest(AppTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(key, self.memcache)
         self.assertEqual(self.memcache['trickler_command']['profile'], 'Hodgdon H1000')
+
+
+class ProfileRecallTest(AppTestCase):
+    """A saved profile is recalled: selecting it puts its settings in force, and tuning
+    done while it is selected is saved to it."""
+
+    def read_ini(self):
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(self.ini)
+        return config
+
+    def save_profile(self, name, **values):
+        helpers.update_ini_section(self.ini, helpers.profile_section(name),
+                                   {k: str(v) for k, v in values.items()})
+        app.config.read(self.ini)
+
+    def tearDown(self):
+        for section in [s for s in app.config.sections() if s.startswith('profile:')]:
+            app.config.remove_section(section)
+
+    def test_selecting_a_profile_puts_its_settings_in_force(self):
+        self.save_profile('Varget', pulse_pwm=28)
+        self.save_profile('H4350', pulse_pwm=35)
+        self.memcache['trickler_settings'] = {'pulse_pwm': '50'}   # a live value from Apply
+        self.client.post('/app/profile', data={'profile': 'Varget', 'select': '1'})
+        self.assertNotIn('trickler_settings', self.memcache,
+                         'the live values went, so the profile is what is in force')
+        values, _ = app.current_trickler_settings()
+        self.assertEqual(values['pulse_pwm'], '28')
+        self.client.post('/app/profile', data={'profile': 'H4350', 'select': '1'})
+        self.assertEqual(app.current_trickler_settings()[0]['pulse_pwm'], '35')
+
+    def test_selecting_the_same_profile_keeps_the_live_values(self):
+        self.save_profile('Varget', pulse_pwm=28)
+        self.memcache['active_profile'] = 'Varget'
+        self.memcache['trickler_settings'] = {'pulse_pwm': '31'}
+        self.client.post('/app/profile', data={'profile': 'Varget', 'select': '1'})
+        self.assertEqual(self.memcache['trickler_settings'], {'pulse_pwm': '31'})
+
+    def test_the_page_shows_the_selected_profiles_values(self):
+        self.save_profile('Varget', pulse_pwm=28)
+        self.memcache['active_profile'] = 'Varget'
+        body = self.client.get('/app/config/').get_data(as_text=True)
+        self.assertIn('id="pulse_pwm" name="pulse_pwm"\n                   value="28"', body)
+        self.assertIn('Editing <strong>Varget</strong>', body)
+
+    def test_apply_with_a_profile_selected_saves_to_the_profile(self):
+        """It used to write [trickler], which the profile hides: lost on reboot."""
+        self.save_profile('Varget', pulse_pwm=28)
+        self.memcache['active_profile'] = 'Varget'
+        before = self.read_ini()['trickler']['pulse_pwm']
+        form = dict(app.current_trickler_settings()[0], pulse_pwm='33')
+        self.client.post('/app/config/update', data=form)
+        config = self.read_ini()
+        self.assertEqual(config['profile:Varget']['pulse_pwm'], '33')
+        self.assertEqual(config['trickler']['pulse_pwm'], before, '[trickler] untouched')
+
+    def test_apply_with_no_profile_saves_to_the_plain_settings(self):
+        form = dict(app.current_trickler_settings()[0], pulse_pwm='33')
+        body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
+        self.assertEqual(self.read_ini()['trickler']['pulse_pwm'], '33')
+        self.assertIn('Editing the plain', body)
+
+    def test_saving_under_a_new_name_creates_and_selects_it(self):
+        self.memcache['trickler_settings'] = {'pulse_pwm': '29'}
+        body = self.client.post('/app/profile', data={
+            'profile': '', 'new_profile': 'Hodgdon H1000', 'save': '1'}).get_data(as_text=True)
+        self.assertEqual(self.read_ini()['profile:Hodgdon H1000']['pulse_pwm'], '29')
+        self.assertEqual(self.memcache['active_profile'], 'Hodgdon H1000')
+        self.assertIn('Saved Hodgdon H1000', body)
+        self.assertIn('<option value="Hodgdon H1000" selected>', body)
+
+    def test_a_new_name_that_exists_is_not_overwritten(self):
+        self.save_profile('Varget', pulse_pwm=28)
+        body = self.client.post('/app/profile', data={
+            'profile': '', 'new_profile': 'Varget', 'save': '1'}).get_data(as_text=True)
+        self.assertIn('already exists', body)
+        self.assertEqual(self.read_ini()['profile:Varget']['pulse_pwm'], '28')
+
+    def test_a_name_that_would_break_the_file_is_refused(self):
+        body = self.client.post('/app/profile', data={
+            'new_profile': 'bad]name', 'save': '1'}).get_data(as_text=True)
+        self.assertIn('Not saved', body)
+        self.assertNotIn('profile:bad]name', open(self.ini, encoding='utf-8').read())
+
+    def test_calibrate_apply_keeps_its_values_when_it_switches_profile(self):
+        """Switching drops the live values; Apply must switch first, then set its own."""
+        self.save_profile('Varget', pulse_pwm=28)
+        self.memcache['active_profile'] = 'Varget'
+        self.client.post('/app/calibrate/apply', data={'pulse_pwm': '41', 'save_profile': 'New'})
+        self.assertEqual(self.memcache['active_profile'], 'New')
+        self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '41')
+
+
+class ProfileDeleteTest(AppTestCase):
+    """Deleting a profile: its section, its learned state, the selection; not history."""
+
+    read_ini = ProfileRecallTest.read_ini
+    save_profile = ProfileRecallTest.save_profile
+    tearDown = ProfileRecallTest.tearDown
+
+    def delete(self, name):
+        return self.client.post('/app/profile', data={'profile': name, 'delete': '1'}).get_data(
+            as_text=True)
+
+    def test_delete_removes_the_section_and_tells_the_trickler(self):
+        self.save_profile('Varget', pulse_pwm=28)
+        self.save_profile('H4350', pulse_pwm=35)
+        self.memcache[helpers.profile_key('trickler_pulse_rate', 'Varget')] = 0.2
+        body = self.delete('Varget')
+        self.assertNotIn('profile:Varget', self.read_ini().sections())
+        self.assertIn('profile:H4350', self.read_ini().sections())
+        self.assertNotIn('Varget', helpers.list_profiles(app.config),
+                         'the page stops listing it at once')
+        self.assertEqual(self.memcache['trickler_command'],
+                         {'command': 'delete_profile', 'profile': 'Varget'})
+        self.assertNotIn(helpers.profile_key('trickler_pulse_rate', 'Varget'), self.memcache)
+        self.assertIn('Deleted Varget', body)
+        self.assertIn('stay in the history', body)
+
+    def test_deleting_the_profile_in_use_falls_back_to_the_plain_settings(self):
+        self.save_profile('Hodgdon H1000', pulse_pwm=28)
+        self.memcache['active_profile'] = 'Hodgdon H1000'
+        self.memcache['trickler_settings'] = {'pulse_pwm': '28'}
+        self.delete('Hodgdon H1000')
+        self.assertEqual(self.memcache['active_profile'], '')
+        self.assertEqual(self.read_ini()['profiles']['active'], '')
+        self.assertNotIn('trickler_settings', self.memcache)
+
+    def test_deleting_another_profile_leaves_the_selection_alone(self):
+        self.save_profile('Varget', pulse_pwm=28)
+        self.save_profile('H4350', pulse_pwm=35)
+        self.memcache['active_profile'] = 'H4350'
+        self.delete('Varget')
+        self.assertEqual(self.memcache['active_profile'], 'H4350')
+
+    def test_nothing_selected_or_unknown_is_refused(self):
+        self.assertIn('Select the profile', self.delete(''))
+        self.assertIn('There is no profile called Nope', self.delete('Nope'))
+        self.assertNotIn('trickler_command', self.memcache)
+
+    def test_a_profile_being_calibrated_cannot_be_deleted(self):
+        self.save_profile('Varget', pulse_pwm=28)
+        self.memcache['calibration_status'] = {'phase': 'sweep', 'finished': False,
+                                               'profile': 'Varget'}
+        self.assertIn('being calibrated', self.delete('Varget'))
+        self.assertIn('profile:Varget', self.read_ini().sections())
+
+    def test_a_finished_calibration_report_for_it_goes_too(self):
+        self.save_profile('Varget', pulse_pwm=28)
+        self.memcache['calibration_status'] = {'phase': 'done', 'finished': True,
+                                               'profile': 'Varget', 'results': {}}
+        self.delete('Varget')
+        self.assertNotIn('calibration_status', self.memcache)
+
+    def test_the_page_offers_delete_and_a_new_name(self):
+        body = self.client.get('/app/config/').get_data(as_text=True)
+        self.assertIn('name="delete"', body)
+        self.assertIn('name="new_profile"', body)
+        self.assertIn('window.confirm', body)

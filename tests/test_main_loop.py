@@ -246,3 +246,35 @@ class ApplyCalibrationTest(PassTestCase):
         with self.assertLogs(level='WARNING'):
             self.run_passes(machine, scale, measure, count=1)
         self.assertNotIn('trickler_pulse_rate:Varget', self.memcache)
+
+
+class DeleteProfileTest(ApplyCalibrationTest):
+    """The trickler's half of deleting a profile: everything it learned about it goes."""
+
+    def test_the_learned_entry_keys_and_model_all_go(self):
+        machine, scale, measure = self.machine('45.00', auto_mode=False)
+        learned = os.path.join(self.directory, 'learned.json')
+        data = helpers.read_json(learned)
+        data['Varget']['rate'] = 0.15
+        data['Other'] = {'rate': 0.3}
+        helpers.write_json(learned, data)
+        self.memcache['trickler_pulse_rate:Varget'] = 0.15
+        settings = main.trickler_settings(self.config, self.memcache, self.constants,
+                                          scale, scale.unit)
+        self.models.for_settings(settings._replace(profile='Varget'))
+
+        self.memcache['trickler_command'] = {'command': 'delete_profile', 'profile': 'Varget'}
+        self.run_passes(machine, scale, measure, count=1)
+
+        data = helpers.read_json(learned)
+        self.assertNotIn('Varget', data, 'rates and calibration record both gone')
+        self.assertIn('Other', data, 'other profiles untouched')
+        self.assertNotIn('trickler_pulse_rate:Varget', self.memcache)
+        self.assertNotIn('Varget', self.models._models)
+
+    def test_a_command_with_no_profile_does_nothing(self):
+        machine, scale, measure = self.machine('45.00', auto_mode=False)
+        self.memcache['trickler_command'] = {'command': 'delete_profile', 'profile': ''}
+        with self.assertLogs(level='WARNING'):
+            self.run_passes(machine, scale, measure, count=1)
+        self.assertIn('Varget', helpers.read_json(os.path.join(self.directory, 'learned.json')))

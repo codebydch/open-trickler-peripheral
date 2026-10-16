@@ -25,7 +25,7 @@ what a new session would otherwise get wrong.
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
-.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 391 tests
+.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 423 tests
 ```
 
 No pytest. Use 3.13 -- it's what the Pi runs, and 3.13 has broken this code before when
@@ -209,6 +209,21 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   the rates as well as the result, and the page says so. And since bench runs change one
   thing at a time, the recommendation also lists `single_changes` -- the current settings
   with one value moved, simulated the same way -- as "Change one thing" on the page.
+- **Profile recall did not work until 2026-10-16**, three ways. The trickler loaded the
+  ini once at startup, so a profile saved from the page reached it only after a restart;
+  now `helpers.ConfigFile` re-reads it whenever it changes (one stat per pass;
+  `[memcache_vars]` still needs a restart). Live overrides (`TRICKLER_SETTINGS`) won over
+  the profile and selecting a profile never cleared them, so switching left the settings
+  where they were; now switching to a *different* profile drops them (and calibrate Apply
+  switches first, then sets its own). The tuning page showed and wrote `[trickler]`, which
+  a saved profile hides completely, so tuning with a profile selected vanished at the next
+  reboot; now the page layers overrides, profile, `[trickler]`, defaults like
+  `main.trickler_settings`, and Apply saves to the selected profile. The rule: **the page
+  edits the selected profile; the trickler follows the file.** Profiles can be created
+  (new-name field) and deleted from the tuning page; delete removes the section
+  (`helpers.remove_ini_section`; `config.read` never drops a section, so the app also
+  calls `remove_section`) and sends `delete_profile`, which drops the whole
+  `learned.json` entry. Charge and pulse history stay.
 - **A run of empty pulses never ends a charge -- the owner's call (2026-10-05).** Eight
   zero-dose pulses in a row used to end it `empty`, and the idle loop then started a new
   charge on the same light pan: thirty in five minutes on 2026-10-04, each a fresh
