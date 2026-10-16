@@ -143,6 +143,42 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
 - An "E" on the scale when the pan is lifted was a scale fault, fixed by resetting the
   scale -- not code.
 
+## The owner's baseline: Hodgdon_H1000 (confirmed 2026-10-16)
+
+What the owner runs, set on the Pi and confirmed setting by setting. Bench changes start
+from here, one at a time; calibrations are run at it. If the tuning page shows anything
+else, ask -- don't assume it was meant. The 10-04 calibration's Apply had left trickle 0.8,
+aim 0.7 and stall 15 in this profile, hidden behind live values for twelve days. Pulse
+feeding starts at 0.5 is what the 10-03 pulse record handed over at (0.28-0.52 gn); aim
+0.85 is the shipped value, and nothing records another before 10-04; stall 17 is the
+10-16 sweep's measurement, inert at 30/45 (it only floors pulse drive and scales the first
+fast-pulse guess after a restart). The starting feed rate only seeds a model that has
+measured nothing.
+
+| # | Tuning page | Key | Value |
+|---|---|---|---|
+| 1 | Coarse trickler off at | `fine_trickle_weight` | 1.5 |
+| 2 | Pulse feeding starts at | `pulse_trickle_weight` | 0.5 |
+| 3 | Longest pulse | `pulse_on_time` | 0.4 |
+| 4 | Motor spin-up | `pulse_dead_time` | 0.12 |
+| 5 | Shortest pulse | `pulse_min_on_time` | 0.15 |
+| 6 | Pause after each pulse | `pulse_off_time` | 0.1 |
+| 7 | Minimum settle wait | `settle_min_time` | 0.3 |
+| 8 | Pulse speed | `pulse_pwm` | 30 |
+| 9 | Fast pulse speed | `pulse_fast_pwm` | 45 |
+| 10 | Fine pulses below | `pulse_fast_until` | 0.1 |
+| 11 | Stall speed | `stall_pwm` | 17 |
+| 12 | Starting feed rate | `pulse_rate` | 0.0625 |
+| 13 | Pulse aim | `pulse_aim` | 0.85 |
+| 14 | Settle timeout | `settle_timeout` | 1.0 |
+| 15 | Stop short by | `cutoff_weight` | 0.02 |
+| 16 | Confirm what landed | `landed_wait` | 2.0 |
+| 17 | Feed rate samples | `rate_window` | 12 |
+| 18 | Look ahead | `lookahead_time` | 0.35 |
+| 19 | Measure jammed under | `stall_drop_weight` | 0.5 |
+| 20 | Dump attempts | `max_dump_attempts` | 3 |
+| 21 | Pause between attempts | `dump_retry_pause` | 1.0 |
+
 ## Things that bit before
 
 - gpiozero's lgpio backend truncates PWM duty to whole percent (200 µs at 50 Hz), so the
