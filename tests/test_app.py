@@ -513,7 +513,19 @@ class CalibratePageTest(AppTestCase):
         body = self.client.post('/app/calibrate/apply', data={
             'pulse_pwm': '999', 'save_profile': ''}, follow_redirects=True).get_data(as_text=True)
         self.assertEqual(self.memcache['trickler_settings']['pulse_pwm'], '100')
-        self.assertIn('adjusted', body)
+        self.assertIn('adjusted: Pulse speed must be between 0 and 100, clamped to 100.', body)
+
+    def test_the_apply_form_submits_fitted_values_finer_than_a_fields_step(self):
+        """The fitted rate and spin-up come to four decimals, in fields stepped 0.01 and
+        0.005. With the browser's own validation on, Chrome refuses to submit them, and
+        Apply does nothing."""
+        results = self.results()
+        results['recommendation']['recommended']['settings'].update(
+            pulse_rate=0.0843, pulse_dead_time=0.1183)
+        self.status(phase='done', finished=True, results=results)
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('value="0.0843"', body)
+        self.assertRegex(body, r'<form [^>]*action="/app/calibrate/apply"[^>]*novalidate')
 
     def test_every_post_that_acts_leaves_the_browser_on_a_get(self):
         """The page fetches itself again when the routine finishes. On the first bench
@@ -623,6 +635,23 @@ class ProfileRecallTest(AppTestCase):
         config = self.read_ini()
         self.assertEqual(config['profile:Varget']['pulse_pwm'], '33')
         self.assertEqual(config['trickler']['pulse_pwm'], before, '[trickler] untouched')
+
+    def test_a_learned_rate_saved_into_a_profile_can_be_applied(self):
+        """Bench, 2026-10-16: Save stored the learned rate, 0.0625, as the starting feed
+        rate, a field stepped 0.01. Chrome refused the form from then on, so Apply did
+        nothing on that profile. The server takes any value in range."""
+        self.memcache['trickler_pulse_rate'] = 0.0625
+        body = self.client.post('/app/profile', data={
+            'new_profile': 'Test', 'save': '1'}).get_data(as_text=True)
+        self.assertIn('value="0.0625"', body)
+        self.assertRegex(body, r'<form [^>]*action="/app/config/update"[^>]*novalidate')
+        form = dict(app.current_trickler_settings()[0], pulse_aim='0.65')
+        body = self.client.post('/app/config/update', data=form).get_data(as_text=True)
+        self.assertIn('Applied. The next charge will use these values, saved to [profile:Test].',
+                      body)
+        section = self.read_ini()['profile:Test']
+        self.assertEqual(section['pulse_rate'], '0.0625')
+        self.assertEqual(section['pulse_aim'], '0.65')
 
     def test_apply_with_no_profile_saves_to_the_plain_settings(self):
         form = dict(app.current_trickler_settings()[0], pulse_pwm='33')

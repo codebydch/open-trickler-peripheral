@@ -227,7 +227,11 @@
         </div>
       {% endif %}
 
-      <form method="post" action="/app/config/update">
+      {# novalidate: the server checks every value (clean_trickler_settings) and says what
+         it clamped. The browser's step check would also refuse values the app writes
+         itself, finer than a field's step -- a learned rate saved into a profile -- and
+         block Apply for good. The step only drives the arrows. #}
+      <form method="post" action="/app/config/update" novalidate>
         {% for setting in settings %}
           <div class="field">
             <label for="{{ setting.name }}">{{ setting.label }}</label>
@@ -243,10 +247,8 @@
 
         <div class="actions">
           <button type="submit" name="save">Apply</button>
-          <button type="submit" name="reset_overrides" class="secondary"
-                  formnovalidate>Revert to saved</button>
-          <button type="submit" name="reset_learned" class="secondary"
-                  formnovalidate>Clear learned feed rate</button>
+          <button type="submit" name="reset_overrides" class="secondary">Revert to saved</button>
+          <button type="submit" name="reset_learned" class="secondary">Clear learned feed rate</button>
         </div>
       </form>
 

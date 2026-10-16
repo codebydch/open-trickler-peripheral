@@ -25,7 +25,7 @@ what a new session would otherwise get wrong.
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
-.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 423 tests
+.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 425 tests
 ```
 
 No pytest. Use 3.13 -- it's what the Pi runs, and 3.13 has broken this code before when
@@ -224,6 +224,13 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   (`helpers.remove_ini_section`; `config.read` never drops a section, so the app also
   calls `remove_section`) and sends `delete_profile`, which drops the whole
   `learned.json` entry. Charge and pulse history stay.
+- **The browser blocked Apply on values the app wrote itself** (bench, 2026-10-16).
+  Profile Save stores the learned rate (0.0625) as `pulse_rate`, a field stepped 0.01,
+  and the calibration page's Apply form carries the fitted rate and spin-up to four
+  decimals. Chrome's step check refused the form, so Apply did nothing, with no message
+  from the server. Both settings forms are `novalidate` now: `clean_trickler_settings`
+  is the only check (it clamps and says so), and `step` only drives the arrows. Don't
+  put browser validation back on a form the app fills in itself.
 - **A run of empty pulses never ends a charge -- the owner's call (2026-10-05).** Eight
   zero-dose pulses in a row used to end it `empty`, and the idle loop then started a new
   charge on the same light pan: thirty in five minutes on 2026-10-04, each a fresh

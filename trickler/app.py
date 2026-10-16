@@ -445,7 +445,10 @@ def calibrate_apply():
     send_command('calibrate_apply', profile=name,
                  pulse_pwm=float(values['pulse_pwm']), pulse_fast_pwm=float(values['pulse_fast_pwm']))
     if errors:
-        notice += ' Some values were adjusted: ' + ' '.join(errors.values())
+        # The only report of an adjusted value: this form has no per-field errors.
+        labels = {setting.name: setting.label for setting in helpers.TRICKLER_SETTINGS}
+        notice += ' Some values were adjusted: ' + ' '.join(
+            '%s %s.' % (labels[key], message) for key, message in errors.items())
     return back_to_calibrate(name, notice)
 
 

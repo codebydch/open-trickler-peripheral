@@ -351,7 +351,10 @@
           Apply puts them in force for the next charge and writes them to the named
           profile (or to <code>[trickler]</code> with no name), and seeds the profile's
           learned feed rates from the calibration at those speeds.</p>
-        <form method="post" action="/app/calibrate/apply" class="proposed">
+        {# novalidate: the fitted rate and spin-up come to four decimals, finer than their
+           fields' steps, and the browser would refuse to submit them. The server checks
+           every value and the notice says what it adjusted. #}
+        <form method="post" action="/app/calibrate/apply" class="proposed" novalidate>
           <div class="scroll"><table>
             <tr><th>Setting</th><th>Current</th><th>Apply</th></tr>
             {% for field in fields %}
@@ -371,7 +374,7 @@
           <div class="actions">
             <button type="submit">Apply</button>
             {% if results_source == 'status' %}
-              <button type="submit" formaction="/app/calibrate/dismiss" formnovalidate class="secondary">Discard</button>
+              <button type="submit" formaction="/app/calibrate/dismiss" class="secondary">Discard</button>
             {% endif %}
           </div>
         </form>
