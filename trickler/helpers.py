@@ -448,7 +448,7 @@ PULSE_COLUMNS = (
     # 'charge' for the final approach of a normal charge, 'calibration' for the routine.
     'source',
     # What landed in the second after the dose was read. The calibration routine measures
-    # it on every third pulse; charges leave it blank.
+    # it on every pulse; charges leave it blank.
     'tail',
 )
 
