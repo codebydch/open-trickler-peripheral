@@ -195,7 +195,7 @@
               <tr>
                 <td>{{ '%g'|format(speed|float) }}%</td>
                 <td>{{ '%.3f'|format(rate) }}</td>
-                <td>{% if results.dead_times and speed in results.dead_times %}{{ '%.3f'|format(results.dead_times[speed]) }}{% if results.dead_time_sources and results.dead_time_sources.get(speed) == 'kept' %} <small>kept{% if results.dead_times_fitted and results.dead_times_fitted.get(speed) is not none %}; fit {{ '%.2f'|format(results.dead_times_fitted[speed]) }} not credible{% endif %}</small>{% endif %}{% else %}&mdash;{% endif %}</td>
+                <td>{% if results.dead_times and speed in results.dead_times %}{{ '%.3f'|format(results.dead_times[speed]) }}{% if results.dead_time_sources and results.dead_time_sources.get(speed) == 'kept' %} <small>kept{% if results.dead_times_fitted and results.dead_times_fitted.get(speed) is not none %}; fit {{ '%.2f'|format(results.dead_times_fitted[speed]) }} not credible{% else %}; no fit: too few pulses per length, or the longer ones did not drop more{% endif %}</small>{% endif %}{% else %}&mdash;{% endif %}</td>
               </tr>
             {% endfor %}
           </table></div>

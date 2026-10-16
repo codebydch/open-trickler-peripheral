@@ -168,7 +168,7 @@
           <table>
             <tr>
               <th>When</th><th>Powder</th><th>Target</th><th>At complete</th>
-              <th>Landed</th><th>Error</th><th>Pulses</th><th>Time</th><th>Rate</th>
+              <th>Landed</th><th>Error</th><th>Pulses</th><th>Time</th><th>Pulsing</th><th>Rate</th>
             </tr>
             {% for row in rows %}
               {% set complete = row.outcome == 'complete' %}
@@ -182,6 +182,7 @@
                 <td class="error">{{ '%+.3f'|format(err) if complete else '' }}</td>
                 <td>{{ row.pulses }}</td>
                 <td>{{ row.seconds }}s</td>
+                <td>{{ row.pulse_seconds ~ 's' if row.pulse_seconds else '—' }}</td>
                 <td>{{ row.learned_rate }}</td>
               </tr>
             {% endfor %}

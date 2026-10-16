@@ -190,6 +190,18 @@ class HistoryPageTest(AppTestCase):
         self.assertIn('+0.040', body, 'the error shown is against what landed')
         self.assertIn('Landed heavy', body)
 
+    def test_the_page_shows_the_final_approach_time(self):
+        helpers.append_charge(self.path, {
+            'timestamp': '2026-10-16T01:41:53', 'profile': '', 'outcome': 'complete',
+            'target': '55.00', 'final': '54.98', 'error': '-0.02', 'unit': 'GRAINS',
+            'pulses': '8', 'seconds': '12.1', 'learned_rate': '0.0968', 'landed': '54.98',
+            'pulse_seconds': '7.4'})
+        self.record(0.01)   # recorded before the column existed
+        body = self.client.get('/app/history').get_data(as_text=True)
+        self.assertIn('<th>Pulsing</th>', body)
+        self.assertIn('<td>7.4s</td>', body)
+        self.assertIn('<td>—</td>', body)
+
     def test_empty_history_says_so_rather_than_failing(self):
         page = self.client.get('/app/history')
         self.assertEqual(page.status_code, 200)
@@ -528,6 +540,15 @@ class CalibratePageTest(AppTestCase):
         self.assertIn('Pulse speed: 30 to 25', body)
         self.assertIn('11.1', body)
         self.assertIn('kept; fit 0.00 not credible', body)
+
+    def test_a_spin_up_with_no_fit_says_why_it_was_kept(self):
+        """Bench, 2026-10-16: the page said only "kept" at 25% and 30%."""
+        results = self.results(dead_time_sources={'30.0': 'kept', '45.0': 'fit'},
+                               dead_times_fitted={'30.0': None, '45.0': 0.12})
+        self.status(phase='done', finished=True, results=results)
+        body = self.client.get('/app/calibrate/').get_data(as_text=True)
+        self.assertIn('kept; no fit: too few pulses per length, or the longer ones did not '
+                      'drop more', body)
 
     def test_results_render_from_the_record_when_memcache_has_forgotten(self):
         helpers.write_json(self.learned, {'Varget': {
