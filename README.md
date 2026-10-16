@@ -124,8 +124,11 @@ proposes settings for it:
    runners-up. Apply is offered only for a recommendation that finished every simulated
    charge within that limit; otherwise the page says why and the current settings stay.
    Check the "Does the model fit this machine?" table first: it puts the prediction for
-   the current settings beside what the last charges for the profile actually did. If
-   those disagree by much, the recommendation is not worth trying yet. The "Change one
+   the current settings beside what the charges thrown at exactly those settings did,
+   final approach to final approach (each charge records its settings and the length of
+   its final approach). If those disagree by much, the recommendation is not worth trying
+   yet. With no such charges yet, throw three at the current settings and reload the
+   page; the check needs no new calibration. The "Change one
    thing" table lists your current settings with a single value moved, best first: the
    way to try the calibration's advice one bench run at a time, from the tuning page. Edit anything you
    like, then **Apply**: the values are written to the profile (or to `[trickler]` with

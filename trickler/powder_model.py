@@ -181,7 +181,12 @@ class SimulatedMotor:
         self.speed = 0.0
 
 
-ChargeResult = collections.namedtuple('ChargeResult', ('error', 'seconds', 'pulses', 'finished'))
+# `seconds` adds a continuous phase estimated from the primed rate, which serves for
+# ranking candidates against each other; `pulse_seconds` is the final approach alone, the
+# part a real charge times on its own (charges.csv `pulse_seconds`) and the one to check
+# the model with.
+ChargeResult = collections.namedtuple(
+    'ChargeResult', ('error', 'seconds', 'pulses', 'finished', 'pulse_seconds'))
 
 
 class ChargeSimulator:
@@ -240,10 +245,13 @@ class ChargeSimulator:
             continuous_seconds = float(distance) / (2 * self.continuous_rate)
         landed = pan.weight + pan.outstanding
         return ChargeResult(float(landed - target), pulse_seconds + continuous_seconds,
-                            feeder.pulses, finished)
+                            feeder.pulses, finished, pulse_seconds)
 
 
-Prediction = collections.namedtuple('Prediction', ('seconds', 'heavy', 'light', 'unfinished', 'pulses'))
+# pulse_seconds defaults to None: calibrations stored before it existed lack it.
+Prediction = collections.namedtuple(
+    'Prediction', ('seconds', 'heavy', 'light', 'unfinished', 'pulses', 'pulse_seconds'),
+    defaults=(None,))
 
 
 def predict(simulator, charges, resolution=0.02):
@@ -255,7 +263,8 @@ def predict(simulator, charges, resolution=0.02):
         heavy=sum(1 for r in results if r.error >= resolution - 1e-9) / n,
         light=sum(1 for r in results if r.error <= -resolution + 1e-9) / n,
         unfinished=sum(1 for r in results if not r.finished) / n,
-        pulses=sum(r.pulses for r in results) / n)
+        pulses=sum(r.pulses for r in results) / n,
+        pulse_seconds=sum(r.pulse_seconds for r in results) / n)
 
 
 # The final-approach settings the recommendation may move, and the values it tries.

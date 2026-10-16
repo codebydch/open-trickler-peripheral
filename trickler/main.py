@@ -786,7 +786,7 @@ def learned_rate_key(constants, profile, fast=False):
 
 
 def record_charge(settings, target_weight, final_weight, target_unit, outcome,
-                  pulses, seconds, learned_rate, landed=None):
+                  pulses, seconds, learned_rate, landed=None, pulse_seconds=None):
     """Writes one finished charge to the history file.
 
     Never raises. A history file that cannot be written is a nuisance; a trickler that
@@ -807,6 +807,8 @@ def record_charge(settings, target_weight, final_weight, target_unit, outcome,
             'seconds': round(seconds, 1),
             'learned_rate': round(learned_rate, 4),
             'landed': '' if landed is None else landed,
+            'pulse_seconds': '' if pulse_seconds is None else round(pulse_seconds, 1),
+            **{name: '%g' % float(getattr(settings, name)) for name in helpers.CHARGE_SETTINGS},
         }, settings.history_max_rows)
     except Exception:
         # Called from a finally block, where raising would mask whatever actually ended
@@ -1070,6 +1072,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
     feeder = PulseFeeder(trickler_motor1, scale, settings, memcache, constants, model=model)
     stale_since = None
     started = time.time()
+    pulse_started = None
     outcome = None
     pidtune_logger.info('timestamp, input (motor %), output (weight %)')
     logging.info('Starting trickling process...')
@@ -1147,6 +1150,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
             if projected_remainder <= settings.pulse_trickle_weight:
                 trickler_motor1.off()
                 trickler_motor2.off()
+                pulse_started = time.time()
                 outcome = pulse_phase(
                     memcache, constants, feeder, scale, target_weight, target_unit)
                 break
@@ -1190,6 +1194,8 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
         # mode switched off, pan lifted, a fault -- is visible in the history instead of
         # silently missing. `outcome` is only set where the charge actually finished.
         seconds = time.time() - started
+        # A charge that finished before the handover had no final approach.
+        pulse_seconds = 0.0 if pulse_started is None else time.time() - pulse_started
         # The reading the charge ended on, taken before anything reads the scale again:
         # landed_weight() below updates scale.weight as it goes.
         final = scale.weight
@@ -1202,7 +1208,7 @@ def trickler_loop(config, memcache, constants, pid, trickler_motor1, trickler_mo
             logging.info('Landed: %s %s (complete at %s)', landed, target_unit, final)
         record_charge(settings, target_weight, final, target_unit,
                       outcome or 'aborted', feeder.pulses, seconds, feeder.rate,
-                      landed=landed)
+                      landed=landed, pulse_seconds=pulse_seconds)
         record_pulses(settings, feeder.records, target_unit)
     logging.info('Trickling process stopped.')
 

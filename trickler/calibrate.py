@@ -476,6 +476,9 @@ class Calibration:
             'dead_time_sources': {str(speed): source
                                   for speed, source in dead_time_sources.items()},
             'pulses': len(self.records),
+            # Not one of the settings the recommendation moves, but the check against real
+            # charges compares only charges thrown at the settle the sweep was read at.
+            'settle_min_time': float(self.settings.settle_min_time),
             'recommendation': None,
         }
         self._powder, self._rates = powder, rates

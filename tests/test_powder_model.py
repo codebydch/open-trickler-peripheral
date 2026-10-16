@@ -100,6 +100,20 @@ class ChargeSimulatorTest(unittest.TestCase):
             self.assertLess(result.pulses, 30)
             self.assertGreater(result.seconds, 0)
 
+    def test_the_final_approach_is_timed_apart_from_the_estimated_trickle(self):
+        """A real charge records its final approach on its own (charges.csv
+        pulse_seconds); the prediction checked against it must be the same part."""
+        powder = steady_powder({30.0: 1, 45.0: 1})
+        sim = powder_model.ChargeSimulator(
+            powder, settings(pulse_pwm=30, pulse_fast_pwm=45, pulse_trickle_weight=0.5),
+            {30.0: 0.1, 45.0: 0.1}, continuous_rate=0.2)
+        result = sim.run()
+        self.assertGreater(result.pulse_seconds, 0)
+        # The rest is the continuous phase: 2.5 gn less the 0.5 handover, at twice 0.2/s.
+        self.assertAlmostEqual(result.seconds - result.pulse_seconds, 2.0 / 0.4, places=6)
+        prediction = powder_model.predict(sim, 5)
+        self.assertLess(prediction.pulse_seconds, prediction.seconds)
+
     def test_a_bursting_powder_lands_heavy(self):
         powder = steady_powder({30.0: 5, 45.0: 5})
         sim = powder_model.ChargeSimulator(powder, settings(pulse_pwm=30, pulse_fast_pwm=45),

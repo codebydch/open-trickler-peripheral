@@ -455,23 +455,59 @@ class CalibratePageTest(AppTestCase):
         self.assertIn('action="/app/calibrate/apply"', body)
         self.assertNotIn('id="nothing-to-apply"', body)
 
-    def test_the_prediction_is_shown_beside_what_the_charges_did(self):
-        charges = os.path.join(self.directory, 'charges.csv')
-        for seconds, landed in (('9.9', '55.00'), ('9.6', '55.02'), ('30.0', '54.98')):
-            helpers.append_charge(charges, {
-                'timestamp': '2026-10-04T23:16:31', 'profile': 'Varget', 'outcome': 'complete',
-                'target': '55.00', 'final': '54.98', 'error': '-0.02', 'unit': 'GRAINS',
-                'pulses': '5', 'seconds': seconds, 'learned_rate': '0.38', 'landed': landed})
-        helpers.append_charge(charges, {
-            'timestamp': '2026-10-04T23:17:00', 'profile': 'Varget', 'outcome': 'empty',
-            'target': '55.00', 'final': '54.40', 'error': '-0.60', 'unit': 'GRAINS',
-            'pulses': '8', 'seconds': '4.9', 'learned_rate': '0.14', 'landed': ''})
+    # The settings the fixture's calibration simulated as current (results() above).
+    SIMULATED = {'pulse_pwm': '30', 'pulse_fast_pwm': '45', 'pulse_fast_until': '0.1',
+                 'pulse_on_time': '0.25', 'pulse_trickle_weight': '0.5', 'pulse_aim': '0.85',
+                 'settle_min_time': '0.3'}
+
+    def charge(self, pulse_seconds='6.0', landed='55.00', outcome='complete', **settings):
+        row = dict(self.SIMULATED, timestamp='2026-10-16T01:41:53', profile='Varget',
+                   outcome=outcome, target='55.00', final='54.98', error='-0.02',
+                   unit='GRAINS', pulses='5', seconds='11.0', learned_rate='0.38',
+                   landed=landed, pulse_seconds=pulse_seconds)
+        row.update(settings)
+        helpers.append_charge(os.path.join(self.directory, 'charges.csv'), row)
+
+    def test_the_prediction_is_checked_against_charges_at_the_simulated_settings(self):
+        """Bench, 2026-10-16: the check took every charge for the profile -- six over
+        twelve days, at settings it no longer held -- and compared whole-trickle seconds
+        with the simulated final approach."""
+        for pulse_seconds, landed in (('6.0', '55.00'), ('7.0', '55.02'), ('8.0', '54.98')):
+            self.charge(pulse_seconds, landed)
+        self.charge('2.0', '55.04', pulse_trickle_weight='0.8')      # other settings
+        self.charge('2.0', '55.04', outcome='empty')                 # not a charge
+        helpers.append_charge(os.path.join(self.directory, 'charges.csv'), {
+            'timestamp': '2026-10-04T23:16:31', 'profile': 'Varget', 'outcome': 'complete',
+            'target': '55.00', 'final': '54.98', 'pulses': '5', 'seconds': '3.0',
+            'landed': '55.04'})                                      # before settings were kept
+        results = self.results()
+        results['recommendation']['current']['prediction']['pulse_seconds'] = 6.4
+        self.status(phase='done', finished=True, results=results)
+        body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
+        self.assertIn('last 3\n              completed charges', body)
+        self.assertIn('Seconds in the final approach', body)
+        self.assertIn('<td>6.4</td>', body, 'predicted final approach')
+        self.assertIn('<td>7.0</td>', body, 'mean final approach of the three')
+        self.assertIn('33%', body, 'one of three landed heavy')
+
+    def test_charges_at_other_settings_leave_nothing_to_check(self):
+        self.charge(pulse_trickle_weight='0.8')
         self.status(phase='done', finished=True, results=self.results())
         body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
-        self.assertIn('id="measured"', body)
-        self.assertIn('last 3 completed charges', body, 'the empty one is not a charge')
-        self.assertIn('16.5', body, 'mean seconds of the three')
-        self.assertIn('33%', body, 'one of three landed heavy')
+        self.assertIn('nothing to check the prediction against', body)
+        self.assertIn('needs\n              no new calibration', body)
+
+    def test_the_settle_the_sweep_was_read_at_must_match_too(self):
+        self.charge()
+        self.status(phase='done', finished=True, results=self.results(settle_min_time=0.6))
+        body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
+        self.assertIn('nothing to check the prediction against', body)
+
+    def test_a_calibration_stored_before_final_approach_seconds_shows_a_dash(self):
+        self.charge()
+        self.status(phase='done', finished=True, results=self.results())
+        body = self.client.get('/app/calibrate/?profile=Varget').get_data(as_text=True)
+        self.assertRegex(body, r'Seconds in the final approach</td>\s*<td>&mdash;</td>')
 
     def test_without_charges_the_page_says_there_is_nothing_to_check_against(self):
         self.status(phase='done', finished=True, results=self.results())
