@@ -200,8 +200,8 @@ if __name__ == '__main__':
     unittest.main()
 
 
-class ApplyCalibrationTest(PassTestCase):
-    """Applying a calibration seeds the profile's rates at the speeds now in force."""
+class LearnedFileTestCase(PassTestCase):
+    """A history directory with a learned.json holding a calibration for Varget."""
 
     def setUp(self):
         super().setUp()
@@ -216,6 +216,10 @@ class ApplyCalibrationTest(PassTestCase):
 
     def tearDown(self):
         shutil.rmtree(self.directory, ignore_errors=True)
+
+
+class ApplyCalibrationTest(LearnedFileTestCase):
+    """Applying a calibration seeds the profile's rates at the speeds now in force."""
 
     def test_the_rates_at_the_applied_speeds_are_taken_as_measured(self):
         machine, scale, measure = self.machine('45.00', auto_mode=False)
@@ -248,7 +252,7 @@ class ApplyCalibrationTest(PassTestCase):
         self.assertNotIn('trickler_pulse_rate:Varget', self.memcache)
 
 
-class DeleteProfileTest(ApplyCalibrationTest):
+class DeleteProfileTest(LearnedFileTestCase):
     """The trickler's half of deleting a profile: everything it learned about it goes."""
 
     def test_the_learned_entry_keys_and_model_all_go(self):
@@ -278,3 +282,23 @@ class DeleteProfileTest(ApplyCalibrationTest):
         with self.assertLogs(level='WARNING'):
             self.run_passes(machine, scale, measure, count=1)
         self.assertIn('Varget', helpers.read_json(os.path.join(self.directory, 'learned.json')))
+
+
+class SelectedProfileTest(LearnedFileTestCase):
+    """The page shows the selected profile's learned rate as soon as it is selected."""
+
+    def test_selecting_a_profile_loads_its_learned_rates(self):
+        """Bench, 2026-10-16: after Use, and after a reboot with another profile in use,
+        the page said "not learned yet" until a charge had run."""
+        learned = os.path.join(self.directory, 'learned.json')
+        data = helpers.read_json(learned)
+        data['Varget'].update(rate=0.0968, fast_rate=0.3455)
+        helpers.write_json(learned, data)
+        machine, scale, measure = self.machine('45.00', auto_mode=False)
+        self.run_passes(machine, scale, measure, count=1)
+        self.assertNotIn('trickler_pulse_rate:Varget', self.memcache, 'not selected yet')
+
+        self.memcache['active_profile'] = 'Varget'
+        self.run_passes(machine, scale, measure, count=1)
+        self.assertAlmostEqual(self.memcache['trickler_pulse_rate:Varget'], 0.0968)
+        self.assertAlmostEqual(self.memcache['trickler_fast_pulse_rate:Varget'], 0.3455)
