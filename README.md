@@ -59,8 +59,13 @@ feeder stops calculating doses that cannot exist and simply places one grain at 
 That learned rate is kept between charges — and across reboots, in `learned.json` beside
 the charge history — and shown on the tuning page, scoped to the selected **powder
 profile**, so switching from a stick powder to a ball powder switches the estimate rather
-than blending the two into an average that fits neither. Profiles are
-created from the tuning page and stored as `[profile:Name]` sections in the config file.
+than blending the two into an average that fits neither. A profile holds the powder's
+settings too: selecting one on the tuning page puts its saved settings in force, and
+tuning done while it is selected is saved to it. Type a name beside the profile list and
+press **Save** to create one; **Delete** removes a profile's settings, learned rates and
+calibration, and keeps its charges in the history. Profiles are stored as
+`[profile:Name]` sections in the config file, which the trickler re-reads whenever it
+changes.
 
 Every charge is recorded: target, the reading when the charge was declared complete, what
 the pan weighed a couple of seconds later once the powder still in the air had landed
@@ -91,7 +96,8 @@ the SD card.
 | `/system.html` | Full system log |
 
 Changes made on the tuning page apply to the **next charge** without restarting anything,
-and are written back to `opentrickler_config.ini` so they survive a reboot.
+and are saved to the selected profile in `opentrickler_config.ini` (or to `[trickler]`
+when none is selected) so they survive a reboot.
 
 ## Calibrating for a powder
 

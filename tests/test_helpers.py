@@ -267,3 +267,101 @@ class ProfileKeyTest(unittest.TestCase):
 
     def test_different_names_never_collide(self):
         self.assertNotEqual(helpers.profile_key('k', 'a b'), helpers.profile_key('k', 'a%20b'))
+
+
+class RemoveIniSectionTest(unittest.TestCase):
+    """Deleting a profile removes its section and nothing else."""
+
+    setUp = UpdateIniTest.setUp
+    tearDown = UpdateIniTest.tearDown
+    _read = UpdateIniTest._read
+
+    def test_the_section_goes_and_everything_else_stays(self):
+        helpers.update_ini_section(self.path, 'profile:Varget', {'pulse_pwm': '28'})
+        helpers.update_ini_section(self.path, 'profile:H4350', {'pulse_pwm': '35'})
+        self.assertTrue(helpers.remove_ini_section(self.path, 'profile:Varget'))
+        after = self._read()
+        self.assertNotIn('profile:Varget', after.sections())
+        self.assertEqual(after['profile:H4350']['pulse_pwm'], '35')
+        self.assertEqual(open(self.path, encoding='utf-8').read().count('#'),
+                         self.original.count('#'), 'every comment survives')
+
+    def test_adding_and_deleting_leaves_the_file_as_it_was(self):
+        """Blank lines must not pile up when profiles come and go."""
+        helpers.update_ini_section(self.path, 'profile:Test', {'pulse_pwm': '28'})
+        helpers.remove_ini_section(self.path, 'profile:Test')
+        self.assertEqual(open(self.path, encoding='utf-8').read(), self.original)
+
+    def test_a_section_that_is_not_there(self):
+        self.assertFalse(helpers.remove_ini_section(self.path, 'profile:Nothing'))
+        self.assertEqual(open(self.path, encoding='utf-8').read(), self.original)
+
+    def test_a_section_in_the_middle(self):
+        before = self._read()
+        self.assertTrue(helpers.remove_ini_section(self.path, 'servo'))
+        after = self._read()
+        self.assertNotIn('servo', after.sections())
+        self.assertEqual(dict(before['PID']), dict(after['PID']))
+        self.assertEqual(dict(before['trickler']), dict(after['trickler']))
+
+
+class ProfileNameTest(unittest.TestCase):
+
+    def test_ordinary_names_are_fine(self):
+        for name in ('Varget', 'Hodgdon H1000', 'IMR 4064 (lot 2)', 'N550/6.5CM'):
+            self.assertIsNone(helpers.profile_name_problem(name), name)
+
+    def test_names_that_would_break_the_config_file(self):
+        for name in ('', 'a]b', '[x', 'k=v', 'two\nlines', 'x' * 41):
+            self.assertIsNotNone(helpers.profile_name_problem(name), repr(name))
+
+
+class ConfigFileTest(unittest.TestCase):
+    """The trickler follows the config file, so a profile saved or deleted from the page
+    reaches it without a restart."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix='.ini')
+        os.close(handle)
+        shutil.copy(CONFIG_PATH, self.path)
+        self.watcher = helpers.ConfigFile(self.path)
+
+    def tearDown(self):
+        os.unlink(self.path)
+
+    def bump(self):
+        """Moves the file's timestamp on, as a later write would."""
+        info = os.stat(self.path)
+        os.utime(self.path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+
+    def test_nothing_changed_means_the_same_config(self):
+        first = self.watcher.refresh()
+        self.assertIs(self.watcher.refresh(), first)
+
+    def test_a_profile_saved_later_is_seen(self):
+        helpers.update_ini_section(self.path, 'profile:Varget', {'pulse_pwm': '28'})
+        self.bump()
+        config = self.watcher.refresh()
+        self.assertEqual(helpers.profile_settings(config, 'Varget')['pulse_pwm'], '28')
+
+    def test_a_deleted_profile_is_gone(self):
+        helpers.update_ini_section(self.path, 'profile:Varget', {'pulse_pwm': '28'})
+        self.bump()
+        self.watcher.refresh()
+        helpers.remove_ini_section(self.path, 'profile:Varget')
+        self.bump()
+        self.assertNotIn('Varget', helpers.list_profiles(self.watcher.refresh()))
+
+    def test_a_broken_file_keeps_the_last_good_config(self):
+        good = self.watcher.refresh()
+        with open(self.path, 'a', encoding='utf-8') as handle:
+            handle.write('\n[broken\nthis is not ini\n')
+        self.bump()
+        with self.assertLogs(level='WARNING'):
+            self.assertIs(self.watcher.refresh(), good)
+
+    def test_a_missing_file_keeps_the_last_good_config(self):
+        good = self.watcher.refresh()
+        os.unlink(self.path)
+        self.assertIs(self.watcher.refresh(), good)
+        shutil.copy(CONFIG_PATH, self.path)  # for tearDown

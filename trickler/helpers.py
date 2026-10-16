@@ -325,6 +325,34 @@ def update_ini_section(path, section, values):
         missing = ['%s = %s\n' % (k, values[k]) for k in sorted(values) if k not in written]
         lines[end:end] = missing
 
+    _replace_lines(path, lines)
+
+
+def remove_ini_section(path, section):
+    """Deletes one section of an ini file -- its header and every line up to the next
+    header -- leaving every other line, comments included, as it was.
+
+    Also takes the one blank line that update_ini_section() puts before a section it
+    adds, so deleting and re-adding a profile does not pile up blank lines. Returns
+    whether the section was there. Replaces the file atomically, like the writer above.
+    """
+    with open(path, 'r', encoding='utf-8') as handle:
+        lines = handle.readlines()
+    header = '[%s]' % section
+    start = next((i for i, line in enumerate(lines) if line.strip() == header), None)
+    if start is None:
+        return False
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].lstrip().startswith('[')), len(lines))
+    if start > 0 and not lines[start - 1].strip():
+        start -= 1
+    del lines[start:end]
+    _replace_lines(path, lines)
+    return True
+
+
+def _replace_lines(path, lines):
+    """Writes `lines` over `path` atomically: a failure leaves the old file intact."""
     directory = os.path.dirname(os.path.abspath(path)) or '.'
     handle = tempfile.NamedTemporaryFile(
         'w', encoding='utf-8', dir=directory, delete=False)
@@ -336,6 +364,50 @@ def update_ini_section(path, section, values):
         if os.path.exists(handle.name):
             os.unlink(handle.name)
         raise
+
+
+class ConfigFile:
+    """The config file as the trickler sees it, re-read whenever it changes on disk.
+
+    The trickler used to load the file once at startup, so a profile saved, edited or
+    deleted from the web page did not reach it until the next restart. `refresh()` is
+    cheap -- one stat -- and is called on every pass of the idle loop. A file that cannot
+    be read or parsed (caught half-edited by hand, say) keeps the last good config, with
+    one warning, rather than taking the trickler down.
+
+    `[memcache_vars]` is read once at startup and still needs a restart to change.
+    """
+
+    def __init__(self, path, config=None):
+        self.path = path
+        self.config = config if config is not None else load_config(path)
+        self._stamp = self._stat()
+        self._warned = None
+
+    def _stat(self):
+        try:
+            info = os.stat(self.path)
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size)
+
+    def refresh(self):
+        """The current config: re-read if the file changed since the last look."""
+        stamp = self._stat()
+        if stamp is None or stamp == self._stamp:
+            return self.config
+        try:
+            config = load_config(self.path)
+        except Exception as exc:  # broken or half-written: keep what works
+            if self._warned != stamp:
+                logging.warning('Could not re-read %s, keeping the last good config: %s',
+                                self.path, exc)
+                self._warned = stamp
+            return self.config
+        self.config = config
+        self._stamp = stamp
+        logging.info('Re-read %s.', self.path)
+        return self.config
 
 
 # --- Charge history -------------------------------------------------------------------
@@ -672,6 +744,23 @@ PROFILE_PREFIX = 'profile:'
 def profile_section(name):
     """The config section name holding a profile's settings."""
     return '%s%s' % (PROFILE_PREFIX, name)
+
+
+# Characters a profile name may not contain. Brackets would break the [profile:Name]
+# section header, '=' would read as a key, and control characters as line breaks.
+PROFILE_NAME_FORBIDDEN = set('[]=') | {chr(c) for c in range(32)} | {chr(127)}
+PROFILE_NAME_MAX = 40
+
+
+def profile_name_problem(name):
+    """Why a profile name cannot be used, or None if it can. Expects it stripped."""
+    if not name:
+        return 'Give the profile a name.'
+    if len(name) > PROFILE_NAME_MAX:
+        return 'Keep the profile name to %d characters.' % PROFILE_NAME_MAX
+    if any(c in PROFILE_NAME_FORBIDDEN for c in name):
+        return 'A profile name cannot contain [ ] or =.'
+    return None
 
 
 def list_profiles(config):
