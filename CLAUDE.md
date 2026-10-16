@@ -25,7 +25,7 @@ what a new session would otherwise get wrong.
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
-.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 384 tests
+.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 391 tests
 ```
 
 No pytest. Use 3.13 -- it's what the Pi runs, and 3.13 has broken this code before when
@@ -199,6 +199,16 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   the limit. The check that matters is on the page: the simulator's prediction for the
   *current* settings beside what the history page measured. If they disagree by much,
   the model is not this machine yet, whatever it recommends.
+- **The second calibration (2026-10-05) was the first whose model fitted the machine:**
+  predicted 12.0 s / 6.7 pulses / 68% heavy for 30/45, against 10.9 s / 7.0 pulses /
+  3 of 5 heavy measured. Its recommendation (25/45, cap 0.15, trickle 0.3, 13.7 s, 13%
+  heavy) was *slower*, because 30/45 misses the 25% heavy limit -- a trade the owner
+  decides, not the recommender (the owner's rule: speed wins). It also carried a fitted spin-up of
+  0.00: the two-point fit lands anywhere when dose barely grows with length. A fit outside
+  `CREDIBLE_DEAD_TIME` (0.05-0.25 s) is now set aside and the configured spin-up kept, for
+  the rates as well as the result, and the page says so. And since bench runs change one
+  thing at a time, the recommendation also lists `single_changes` -- the current settings
+  with one value moved, simulated the same way -- as "Change one thing" on the page.
 - **A run of empty pulses never ends a charge -- the owner's call (2026-10-05).** Eight
   zero-dose pulses in a row used to end it `empty`, and the idle loop then started a new
   charge on the same light pan: thirty in five minutes on 2026-10-04, each a fresh

@@ -55,6 +55,13 @@ TAIL_SECONDS = 1.0
 
 RECOMMEND_THREADED = True
 
+# A fitted spin-up outside this range is not believed. The fit is a line through the mean
+# dose at two pulse lengths, and on this machine dose barely depends on length -- the
+# tube decides, not the timer -- so the line can land anywhere. The second bench
+# calibration (2026-10-05) fitted 0.00 s against the measured 0.12, and applying it would
+# have resized every pulse. Out of range, the configured spin-up is kept.
+CREDIBLE_DEAD_TIME = (0.05, 0.25)
+
 
 CalibrationSettings = collections.namedtuple('CalibrationSettings', (
     'speeds',           # pulse speeds (PWM %) to sweep
@@ -426,7 +433,7 @@ class Calibration:
         """Per-cell distributions, per-speed rates, then the recommendation."""
         powder = powder_model.EmpiricalPowder(self.cells, rng=self._rng)
         summary = powder.cell_summary(self._hw.scale.resolution)
-        rates, dead_times = {}, {}
+        rates, dead_times, fitted_dead_times, dead_time_sources = {}, {}, {}, {}
         for speed in sorted(self.cal.speeds):
             # A pulse delivered its dose and its tail: the tail landed after the settle
             # read, but the pulse put it in the air. The fits count both.
@@ -436,9 +443,17 @@ class Calibration:
             # The spin-up comes from the two-point solve across pulse lengths, when there
             # are enough pulses for the two means to be a line and not two lumps.
             fit = helpers.pulse_fit(rows, min_per_bucket=max(10, self.cal.pulses_per_cell))
-            dead_time = fit['dead_time'] if fit['rate'] else self.settings.pulse_dead_time
-            dead_time = min(max(dead_time, 0.0), 0.3)
+            fitted = fit['dead_time'] if fit['rate'] else None
+            low, high = CREDIBLE_DEAD_TIME
+            if fitted is not None and low <= fitted <= high:
+                dead_time, source = fitted, 'fit'
+            else:
+                # Kept for the rate below as well as for the recommendation, so the rate
+                # is per second of movement as the feeder will count it.
+                dead_time, source = float(self.settings.pulse_dead_time), 'kept'
             dead_times[speed] = dead_time
+            fitted_dead_times[speed] = fitted
+            dead_time_sources[speed] = source
             # The rate is what the feeder itself learns: everything delivered over all
             # the time the motor was moving, which lumps cannot invert the way a
             # difference of two means can.
@@ -456,6 +471,10 @@ class Calibration:
                       for (speed, duration), stats in summary.items()],
             'rates': {str(speed): rate for speed, rate in rates.items()},
             'dead_times': {str(speed): dead for speed, dead in dead_times.items()},
+            'dead_times_fitted': {str(speed): (None if fitted is None else round(fitted, 4))
+                                  for speed, fitted in fitted_dead_times.items()},
+            'dead_time_sources': {str(speed): source
+                                  for speed, source in dead_time_sources.items()},
             'pulses': len(self.records),
             'recommendation': None,
         }

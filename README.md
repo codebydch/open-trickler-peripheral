@@ -117,7 +117,9 @@ proposes settings for it:
    charge within that limit; otherwise the page says why and the current settings stay.
    Check the "Does the model fit this machine?" table first: it puts the prediction for
    the current settings beside what the last charges for the profile actually did. If
-   those disagree by much, the recommendation is not worth trying yet. Edit anything you
+   those disagree by much, the recommendation is not worth trying yet. The "Change one
+   thing" table lists your current settings with a single value moved, best first: the
+   way to try the calibration's advice one bench run at a time, from the tuning page. Edit anything you
    like, then **Apply**: the values go live for the next charge, are written to the
    profile (or to `[trickler]` with no name), and the profile's learned feed rates are
    seeded from the calibration. The results also stay with the profile in

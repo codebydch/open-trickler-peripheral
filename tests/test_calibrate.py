@@ -303,3 +303,28 @@ class FitTest(CalibrationTestCase):
         moving = 10 * (0.25 - dead) + 10 * (0.40 - dead)
         self.assertAlmostEqual(rates['30.0'], 1.0 / moving, places=3)
         self.assertGreater(rates['30.0'], 0.3 / moving * 1.5, 'the doses alone would read 0.3')
+
+    def test_an_incredible_spin_up_is_not_carried(self):
+        """The second bench calibration fitted 0.00 s against the measured 0.12: dose
+        barely grows with pulse length on this machine, so the line through two means
+        lands anywhere. The configured spin-up is kept, for the rate and the result."""
+        # Mean total 0.025 at 0.25 s and 0.04 at 0.40 s: a line with spin-up 0.00.
+        cells = {(30.0, 0.25): [(0.01, 0.015)] * 10, (30.0, 0.40): [(0.02, 0.02)] * 10,
+                 (25.0, 0.25): [(0.0, 0.0)] * 10, (45.0, 0.25): [(0.04, 0.04)] * 10}
+        calibration = self.calibration_with_cells(cells)
+        configured = float(calibration.settings.pulse_dead_time)
+        results = calibration.results
+        self.assertAlmostEqual(results['dead_times']['30.0'], configured)
+        self.assertEqual(results['dead_time_sources']['30.0'], 'kept')
+        self.assertAlmostEqual(results['dead_times_fitted']['30.0'], 0.0, places=6)
+        moving = 10 * (0.25 - configured) + 10 * (0.40 - configured)
+        self.assertAlmostEqual(results['rates']['30.0'], (0.25 + 0.40) / moving, places=3,
+                               msg='the rate is per second of movement at the kept spin-up')
+
+    def test_a_credible_spin_up_is_used(self):
+        # Mean total 0.02 at 0.25 s and 0.06 at 0.40 s: rate 0.267, spin-up 0.175.
+        cells = {(30.0, 0.25): [(0.01, 0.01)] * 10, (30.0, 0.40): [(0.03, 0.03)] * 10,
+                 (25.0, 0.25): [(0.0, 0.0)] * 10, (45.0, 0.25): [(0.04, 0.04)] * 10}
+        results = self.calibration_with_cells(cells).results
+        self.assertEqual(results['dead_time_sources']['30.0'], 'fit')
+        self.assertAlmostEqual(results['dead_times']['30.0'], 0.175, places=3)

@@ -276,6 +276,32 @@ def candidates(base, speeds, durations):
                 pulse_trickle_weight=D(trickle), pulse_aim=aim, pulse_fast_until=D(until))
 
 
+def single_changes(base, speeds, durations):
+    """Every variant of `base` that moves exactly one setting to another grid value.
+
+    The owner's rule at the bench is one change per run, three charges, the display noted
+    after each -- so the variants that can actually be tried next are the ones that move
+    one thing. Yields (setting, from, to, settings).
+    """
+    speeds = sorted(float(s) for s in speeds)
+    durations = sorted(float(d) for d in durations)
+    fine, fast = float(base.pulse_pwm), float(base.pulse_fast_pwm)
+    choices = (
+        ('pulse_pwm', [s for s in speeds if s <= fast]),
+        ('pulse_fast_pwm', [s for s in speeds if s >= fine]),
+        ('pulse_on_time', durations),
+        ('pulse_trickle_weight', [D(t) for t in TRICKLE_WEIGHTS]),
+        ('pulse_aim', list(AIMS)),
+        ('pulse_fast_until', [D(u) for u in FAST_UNTILS] if fast > fine else []),
+    )
+    for name, values in choices:
+        current = getattr(base, name)
+        for value in values:
+            if float(value) == float(current):
+                continue
+            yield name, float(current), float(value), base._replace(**{name: value})
+
+
 def recommend(powder, base, rates, continuous_rate, speeds, durations, heavy_limit=0.25,
               first_pass=60, second_pass=300, finalists=12, progress=None, stop=None, seed=3):
     """Picks the fastest candidate whose heavy rate stays under `heavy_limit`.
@@ -285,12 +311,15 @@ def recommend(powder, base, rates, continuous_rate, speeds, durations, heavy_lim
     as it goes; `stop()` returning True ends it early with whatever is known.
 
     Returns a dict: `recommended` (settings dict + prediction), `current` (the base
-    settings' prediction), `runners_up`, and `evaluated` (how many candidates).
+    settings' prediction), `runners_up`, `single_changes` (each variant of the current
+    settings that moves one value, best first, at the longer look), `reason` (why the
+    best does not qualify, or None), and `evaluated` (how many candidates).
     """
     rng = random.Random(seed)
     scored = []
     pool = list(candidates(base, speeds, durations))
-    total = len(pool) + finalists + 1
+    variants = list(single_changes(base, speeds, durations))
+    total = len(pool) + finalists + len(variants) + 1
     done = 0
 
     def evaluate(settings, charges):
@@ -346,6 +375,18 @@ def recommend(powder, base, rates, continuous_rate, speeds, durations, heavy_lim
             'meets_limit': qualifies(prediction),
         }
 
+    changes = []
+    for name, before, after, settings in variants:
+        if stop and stop():
+            break
+        prediction = evaluate(settings, second_pass)
+        changes.append(dict(describe(settings, prediction),
+                            change={'setting': name, 'from': before, 'to': after}))
+        done += 1
+        if progress:
+            progress(min(1.0, done / total))
+    changes.sort(key=lambda c: rank((None, Prediction(**c['prediction']))))
+
     best_settings, best_prediction = refined[0]
     reason = None
     if not qualifies(best_prediction):
@@ -363,6 +404,7 @@ def recommend(powder, base, rates, continuous_rate, speeds, durations, heavy_lim
         'recommended': describe(best_settings, best_prediction),
         'reason': reason,
         'runners_up': [describe(s, p) for s, p in refined[1:4]],
+        'single_changes': changes,
         'evaluated': len(scored),
     }
 
