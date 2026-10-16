@@ -268,7 +268,8 @@ class ProfilePageTest(AppTestCase):
 
     def test_saving_captures_the_settings_and_the_learned_rate(self):
         self.memcache['trickler_pulse_rate'] = 0.375
-        self.client.post('/app/profile', data={'profile': 'Varget', 'save': '1'})
+        body = self.client.post('/app/profile', data={
+            'profile': 'Varget', 'save': '1'}).get_data(as_text=True)
 
         config = configparser.ConfigParser()
         config.optionxform = str
@@ -276,6 +277,17 @@ class ProfilePageTest(AppTestCase):
         self.assertIn('profile:Varget', config.sections())
         self.assertEqual(float(config['profile:Varget']['pulse_rate']), 0.375)
         self.assertEqual(self.memcache['active_profile'], 'Varget')
+        self.assertIn('Saved Varget. Starting feed rate set to 0.375 /s, the rate learned '
+                      'so far.', body)
+
+    def test_saving_with_nothing_learned_does_not_claim_a_learned_rate(self):
+        """Bench, 2026-10-16: it said "including a learned feed rate of" the starting
+        rate whether anything had been learned or not."""
+        body = self.client.post('/app/profile', data={
+            'profile': 'Varget', 'save': '1'}).get_data(as_text=True)
+        self.assertIn('Saved Varget.', body)
+        self.assertNotIn('learned feed rate of', body)
+        self.assertNotIn('rate learned so far.', body)
 
     def test_saving_without_a_name_is_refused(self):
         body = self.client.post('/app/profile', data={'save': '1'}).get_data(as_text=True)

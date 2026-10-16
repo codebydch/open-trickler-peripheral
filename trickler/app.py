@@ -546,9 +546,14 @@ def update_profile():
         note = select_profile(name)
         # The section now holds exactly what the overrides held.
         memcache_client.delete(constants.TRICKLER_SETTINGS.value)
-        return render_config(
-            notice='Saved %s, including a learned feed rate of %s.%s'
-                   % (name, values.get('pulse_rate', 'the configured default'), note))
+        # Said as what it is. It used to say "including a learned feed rate of" whatever
+        # the starting rate was, learned or not, and a new profile gets the rate only as
+        # its starting guess: its own learned rate starts empty.
+        notice = 'Saved %s.' % name
+        if rate:
+            notice += ' Starting feed rate set to %s /s, the rate learned so far.' % (
+                values['pulse_rate'])
+        return render_config(notice=notice + note)
 
     if 'delete' in request.form:
         return delete_profile(selected)
