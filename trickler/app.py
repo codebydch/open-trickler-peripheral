@@ -679,7 +679,7 @@ def save_settings(section, values):
     The trickler follows the file, so a saved value needs nothing else. Live overrides
     are only the fallback when the file cannot be written: Apply used to set them every
     time as well, so the page warned of live values after every Apply, and values set
-    that way could outlive what was saved -- for two weeks before the bench of
+    that way could outlive what was saved -- for twelve days before the bench of
     2026-10-16 they hid a profile's real contents. A successful save drops any left over.
     """
     try:

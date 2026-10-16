@@ -25,7 +25,7 @@ what a new session would otherwise get wrong.
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install pymemcache flask pyserial gpiozero pillow
-.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 425 tests
+.venv/bin/python -m unittest discover -t . -s tests      # from the repo root; 433 tests
 ```
 
 No pytest. Use 3.13 -- it's what the Pi runs, and 3.13 has broken this code before when
@@ -59,8 +59,8 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   `calibrate` command and steered by `calibrate_continue` / `calibrate_abort`; status under
   the `CALIBRATION_STATUS` key. `/app/calibrate/` (`app.py`, `templates/calibrate.html`)
   starts it, polls the status, shows the cell table and the recommendation, and **Apply**
-  writes the values (live overrides + the profile's section, or `[trickler]` with no
-  name) and sends `calibrate_apply`, which seeds the profile's `FeedModel` from the
+  writes the values to the profile's section (or `[trickler]` with no name) and sends
+  `calibrate_apply`, which seeds the profile's `FeedModel` from the
   calibration's per-speed rates at the speeds now in force. The screen shows an amber
   CALIBRATING band while it runs and a red EMPTY CUP / PAN MISSING one on a pause. `trickler/powder_model.py` -- a powder as the sweep measured
   it (`EmpiricalPowder`) and charges simulated against it through the real `PulseFeeder`
@@ -112,6 +112,10 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   landed, with tails of 1-3 divisions arriving after "complete". At a 0.6 s settle, 2 of
   3 matched. `charges.csv` records the completion reading, not what landed; only the
   display knows that.
+- **By the read, a pulse has landed almost nothing** (sweep of 2026-10-16, settle 0.3):
+  45% / 0.40 s read 0.004 gn by the read and 0.074 in the second after; 30% / 0.40 s,
+  0.004 and 0.022. On 2026-10-05 it was 0.025 against 0.048 at 45%. At this settle the
+  feeder sizes each pulse with ~5% of the previous one on the scale.
 
 ## Decided, with the reason -- don't relitigate without new evidence
 
@@ -170,7 +174,11 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   A profile's `learned.json` entry is shared: the model owns `rate` / `fast_rate` /
   `updated`, the routine owns `calibration`. `FeedModel._write` merges, and `reset` keeps
   the calibration block -- the first version replaced the entry whole, and the first
-  pulse learned after a calibration erased its results.
+  pulse learned after a calibration erased its results. The other way round, the
+  routine writes only its block: until 2026-10-16 it also wrote its fitted rates, in the
+  file only, so a calibration nobody applied changed the stored rate behind the model.
+  The daemon loads the active profile's model on the idle pass, not only at startup and
+  at a charge; otherwise the page says "not learned yet" after Use or a reboot.
 - Reading pulse logs: `remainder: R ... scale: W ... pulsed T s -> D (rate X/s)` -- R is
   before the pulse, W after, and X is the **fine** rate only. Fast-pulse learning isn't
   logged; `pulses.csv` has both, with the rate at the speed each pulse used, and a
@@ -214,8 +222,11 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   now `helpers.ConfigFile` re-reads it whenever it changes (one stat per pass;
   `[memcache_vars]` still needs a restart). Live overrides (`TRICKLER_SETTINGS`) won over
   the profile and selecting a profile never cleared them, so switching left the settings
-  where they were; now switching to a *different* profile drops them (and calibrate Apply
-  switches first, then sets its own). The tuning page showed and wrote `[trickler]`, which
+  where they were; now switching to a *different* profile drops them, and Apply (tuning
+  page and calibration page) no longer sets them at all -- it writes the file and drops
+  any left over; live values are only the fallback when the file cannot be written.
+  Overrides set by every Apply had hidden, for the twelve days since, that Hodgdon_H1000
+  still held the 10-04 calibration's trickle weight 0.8, aim 0.7 and stall 15. The tuning page showed and wrote `[trickler]`, which
   a saved profile hides completely, so tuning with a profile selected vanished at the next
   reboot; now the page layers overrides, profile, `[trickler]`, defaults like
   `main.trickler_settings`, and Apply saves to the selected profile. The rule: **the page
@@ -231,6 +242,19 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
   from the server. Both settings forms are `novalidate` now: `clean_trickler_settings`
   is the only check (it clamps and says so), and `step` only drives the arrows. Don't
   put browser validation back on a form the app fills in itself.
+- **The third calibration's fit check (2026-10-16) failed for reasons outside the model.**
+  Predicted 14.7 s / 43% heavy / 10.9 pulses for the current settings against 9.2 s /
+  17% / 8.0 measured. The "measured" side was every completed charge for the profile --
+  six over twelve days, at settings nobody can now reconstruct, since charges did not
+  record them and the profile's own values were hidden for part of that time -- and its
+  seconds were the whole trickle, while the prediction's were the final
+  approach plus a continuous phase guessed at twice the 45% primed rate (real trickling
+  runs much faster). Offline on the same rows, trickle 0.5 predicts 7.6 pulses, close to
+  the old charges' 8.0. Now each charge records the final-approach settings and
+  `pulse_seconds`, the simulator reports `pulse_seconds` apart, and the check uses only
+  charges thrown at exactly the settings the calibration simulated as current (and its
+  settle), final approach to final approach. Old rows never match; three new charges and
+  a reload give the check without recalibrating.
 - **A run of empty pulses never ends a charge -- the owner's call (2026-10-05).** Eight
   zero-dose pulses in a row used to end it `empty`, and the idle loop then started a new
   charge on the same light pan: thirty in five minutes on 2026-10-04, each a fresh
