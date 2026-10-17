@@ -115,7 +115,14 @@ so the charge tests keep their meaning until the endgame is redesigned on the lu
 - **By the read, a pulse has landed almost nothing** (sweep of 2026-10-16, settle 0.3):
   45% / 0.40 s read 0.004 gn by the read and 0.074 in the second after; 30% / 0.40 s,
   0.004 and 0.022. On 2026-10-05 it was 0.025 against 0.048 at 45%. At this settle the
-  feeder sizes each pulse with ~5% of the previous one on the scale.
+  feeder sizes each pulse with ~5% of the previous one on the scale. The evening sweep
+  agreed: 45% / 0.40 s, 0.010 by the read and 0.078 after.
+- **Performance at the owner's baseline** (2026-10-16 evening, three charges, nothing
+  changed): final approach 5.4 / 5.2 / 5.1 s, 5 / 4 / 4 pulses, whole trickle 9.1 / 10.1 /
+  8.7 s; landed 55.00 all three, display 55.02 / 55.00 / 55.00. The best on record. The
+  learned fine rate (0.1136) did not move over the three: the endgame's pulses delivered
+  too little inside the window to learn from, by design. In the pulse record, charges at
+  trickle 0.5 hand over at 0.36-0.38 gn and the one at 0.8 at 0.62.
 
 ## Decided, with the reason -- don't relitigate without new evidence
 
@@ -291,6 +298,18 @@ measured nothing.
   charges thrown at exactly the settings the calibration simulated as current (and its
   settle), final approach to final approach. Old rows never match; three new charges and
   a reload give the check without recalibrating.
+- **The fourth calibration (2026-10-16 evening, at the baseline) gave the first fit check
+  like for like, and the model is still pessimistic:** predicted 6.6 s / 6.5 pulses / 56%
+  heavy for the final approach, against 5.2 s / 4.3 pulses / 0 of 3 heavy by `landed`
+  (1 of 3 by the display) over three charges. Three charges cannot judge a heavy rate,
+  but the pulse count is half again too high. Offline on the same 90 rows: seeding the
+  simulation with the learned rates instead of the fit changes nothing (6.4 pulses); it
+  reaches ~4.5 only with trickle 0.3. So either a real final approach starts with less to
+  do than `handover = trickle x U(0.6, 1.05)` assumes, or its first pulses -- the tube just
+  loaded by the continuous phase -- drop more than the sweep's cells. The charges' own
+  pulse rows decide which. Until the model matches, its recommendation (here cap 0.25,
+  trickle 0.3, aim 0.7: same seconds, predicted heavy 23%) is not worth trying, and the
+  owner keeps the baseline; nothing in "Change one thing" was faster by more than noise.
 - **A run of empty pulses never ends a charge -- the owner's call (2026-10-05).** Eight
   zero-dose pulses in a row used to end it `empty`, and the idle loop then started a new
   charge on the same light pan: thirty in five minutes on 2026-10-04, each a fresh
