@@ -304,12 +304,21 @@ measured nothing.
   (1 of 3 by the display) over three charges. Three charges cannot judge a heavy rate,
   but the pulse count is half again too high. Offline on the same 90 rows: seeding the
   simulation with the learned rates instead of the fit changes nothing (6.4 pulses); it
-  reaches ~4.5 only with trickle 0.3. So either a real final approach starts with less to
-  do than `handover = trickle x U(0.6, 1.05)` assumes, or its first pulses -- the tube just
-  loaded by the continuous phase -- drop more than the sweep's cells. The charges' own
-  pulse rows decide which. Until the model matches, its recommendation (here cap 0.25,
-  trickle 0.3, aim 0.7: same seconds, predicted heavy 23%) is not worth trying, and the
-  owner keeps the baseline; nothing in "Change one thing" was faster by more than noise.
+  reaches ~4.5 only with trickle 0.3. The charges' own pulse rows answered part of it.
+  They handed over at 0.34 / 0.36 / 0.38 gn (and 0.36-0.38 on 10-04/05), where the
+  simulator draws `handover = trickle x U(0.6, 1.05)`, 0.30-0.525 for 0.5, from the
+  10-03 record; with the bench's 0.34-0.38 it predicts 5.7 pulses / 5.8 s instead of
+  6.5 / 6.6 -- about 40% of the gap. Their first pulses did *not* drop more than the
+  sweep: 45% / 0.40 s averaged 0.089 gn a pulse in the charges (the previous pulse's tail
+  credited, as always at 0.3) against the sweep's 0.088 total. The rest of the gap is at
+  the end: each real charge finished with one short fast pulse at ~0.12 remaining and at
+  most one fine pulse at 0.04 (two of two dropped a grain), where the simulation often
+  fires two to four fine pulses because the 30% cells hold 30-60% zeros. Three charges
+  cannot settle that, or the heavy rate; a full session at the baseline can, and its
+  first remainders give the handover distribution to simulate from. Until the model
+  matches, its recommendation (here cap 0.25, trickle 0.3, aim 0.7: same seconds,
+  predicted heavy 23%) is not worth trying, and the owner keeps the baseline; nothing in
+  "Change one thing" was faster by more than noise.
 - **A run of empty pulses never ends a charge -- the owner's call (2026-10-05).** Eight
   zero-dose pulses in a row used to end it `empty`, and the idle loop then started a new
   charge on the same light pan: thirty in five minutes on 2026-10-04, each a fresh
